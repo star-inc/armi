@@ -151,7 +151,9 @@ func (c *EmbeddingConsumer) handle(ctx context.Context, d amqp.Delivery) {
 	var job contract.EmbeddingJob
 	if err := json.Unmarshal(d.Body, &job); err != nil {
 		slog.Error("embedding consumer: failed to unmarshal job, discarding", "error", err)
-		_ = d.Nack(false, false) // dead-letter, don't requeue garbage
+		if nackErr := d.Nack(false, false); nackErr != nil {
+			slog.Error("embedding consumer: failed to Nack malformed job", "error", nackErr)
+		}
 		return
 	}
 
@@ -178,7 +180,9 @@ func (c *EmbeddingConsumer) handle(ctx context.Context, d amqp.Delivery) {
 			"error":   processErr.Error(),
 		})
 		// Nack without requeue to avoid poison-pill loops; move to DLQ if configured
-		_ = d.Nack(false, false)
+		if nackErr := d.Nack(false, false); nackErr != nil {
+			slog.Error("embedding consumer: failed to Nack failed job", "job_id", job.JobID, "error", nackErr)
+		}
 		return
 	}
 
@@ -187,7 +191,9 @@ func (c *EmbeddingConsumer) handle(ctx context.Context, d amqp.Delivery) {
 		"file_id": job.FileID,
 	})
 
-	_ = d.Ack(false)
+	if ackErr := d.Ack(false); ackErr != nil {
+		slog.Error("embedding consumer: failed to Ack completed job", "job_id", job.JobID, "error", ackErr)
+	}
 	slog.Info("embedding consumer: job completed", "job_id", job.JobID, "file_id", job.FileID)
 }
 

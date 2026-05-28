@@ -138,7 +138,7 @@ func (p *RabbitMQPublisher) PublishEvent(ctx context.Context, eventType string, 
 	// Additionally broadcast on fanout exchange
 	if p.broadcastExchange != "" {
 		if err = ch.PublishWithContext(pubCtx, p.broadcastExchange, "", false, false, publishing); err != nil {
-			slog.Warn("failed to broadcast event on fanout exchange", "event", eventType, "error", err)
+			slog.Error("failed to broadcast event on fanout exchange", "event", eventType, "error", err)
 		} else {
 			slog.Debug("Broadcast event on fanout exchange", "event", eventType)
 		}

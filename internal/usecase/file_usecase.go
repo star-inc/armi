@@ -362,9 +362,8 @@ func (uc *FileUsecase) Delete(ctx context.Context, userID string, fileID string)
 	}
 
 	// Delete Vector point
-	err = uc.vectorDB.Delete(ctx, fileID)
-	if err != nil {
-		slog.Warn("failed to delete embedding from vector database", "file_id", fileID, "error", err)
+	if err = uc.vectorDB.Delete(ctx, fileID); err != nil {
+		slog.Error("failed to delete embedding from vector database", "file_id", fileID, "error", err)
 	}
 
 	// Check global reference count

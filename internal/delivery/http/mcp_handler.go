@@ -192,7 +192,7 @@ func (h *MCPHandler) handleReadFile(ctx context.Context, request mcp.CallToolReq
 
 	text, err := extractor.ExtractText(data, filename)
 	if err != nil {
-		slog.Warn("MCP read_file tool failed to extract text, returning empty content", "file_id", fileID, "error", err)
+		slog.Error("MCP read_file tool failed to extract text", "file_id", fileID, "error", err)
 		return nil, fmt.Errorf("failed to extract text from document: %w", err)
 	}
 
