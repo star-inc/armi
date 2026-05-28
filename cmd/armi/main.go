@@ -15,6 +15,11 @@ import (
 	"github.com/supersonictw/armi/internal/usecase"
 )
 
+// @title           Armi File Manager API
+// @version         1.0
+// @description     Armi PDF/Word/Excel/PPT/TXT/RTF 檔案管理器 RESTful API。
+// @BasePath        /api/v1
+// @securityDefinitions.basic  BasicAuth
 func main() {
 	// 1. Initialize Configuration (Viper)
 	config.InitConfig()

@@ -29,6 +29,19 @@ func NewFileHandler(fileUsecase *usecase.FileUsecase, publisher file.EventPublis
 }
 
 // Upload handles multipart file upload, records progress, and invokes UseCase.
+// @Summary      Upload a document file
+// @Description  Uploads a new file (PDF, Word, Excel, PPT, TXT, RTF) with upload progress reporting, SHA3-256 deduplication check, and embedding generation.
+// @Tags         files
+// @Accept       multipart/form-data
+// @Produce      json
+// @Param        file  formData  file  true  "The document file to upload"
+// @Success      200   {object}  contract.FileResponse
+// @Failure      400   {object}  map[string]string "Missing file or invalid request"
+// @Failure      401   {object}  map[string]string "Unauthorized"
+// @Failure      409   {object}  map[string]string "File conflict (duplicate filename or hash)"
+// @Failure      500   {object}  map[string]string "Internal server error"
+// @Security     BasicAuth
+// @Router       /files [post]
 func (h *FileHandler) Upload(c *gin.Context) {
 	val, ok := c.Get("user")
 	if !ok {
@@ -102,6 +115,15 @@ func (h *FileHandler) Upload(c *gin.Context) {
 }
 
 // List lists all files owned by the user.
+// @Summary      List user files
+// @Description  Retrieves list of all metadata records of files owned by the authenticated user.
+// @Tags         files
+// @Produce      json
+// @Success      200   {array}   contract.FileResponse
+// @Failure      401   {object}  map[string]string "Unauthorized"
+// @Failure      500   {object}  map[string]string "Database error"
+// @Security     BasicAuth
+// @Router       /files [get]
 func (h *FileHandler) List(c *gin.Context) {
 	val, ok := c.Get("user")
 	if !ok {
@@ -120,6 +142,18 @@ func (h *FileHandler) List(c *gin.Context) {
 }
 
 // Download downloads a file by ID.
+// @Summary      Download a file
+// @Description  Downloads a file's raw content by its unique file record ID.
+// @Tags         files
+// @Produce      octet-stream
+// @Param        id    path      string  true  "File ID"
+// @Success      200   {file}    file "The downloaded file contents"
+// @Failure      401   {object}  map[string]string "Unauthorized"
+// @Failure      403   {object}  map[string]string "Forbidden (access denied)"
+// @Failure      404   {object}  map[string]string "File not found"
+// @Failure      500   {object}  map[string]string "Download error"
+// @Security     BasicAuth
+// @Router       /files/{id} [get]
 func (h *FileHandler) Download(c *gin.Context) {
 	val, ok := c.Get("user")
 	if !ok {
@@ -150,6 +184,18 @@ func (h *FileHandler) Download(c *gin.Context) {
 }
 
 // GetMetadata returns database and physical metadata of a file.
+// @Summary      Get file metadata
+// @Description  Fetches the database record metadata and physical storage (OpenDAL) stat information of the specified file.
+// @Tags         files
+// @Produce      json
+// @Param        id    path      string  true  "File ID"
+// @Success      200   {object}  map[string]interface{} "File metadata wrapper (database_record and physical_storage)"
+// @Failure      401   {object}  map[string]string "Unauthorized"
+// @Failure      403   {object}  map[string]string "Forbidden (access denied)"
+// @Failure      404   {object}  map[string]string "File not found"
+// @Failure      500   {object}  map[string]string "Metadata error"
+// @Security     BasicAuth
+// @Router       /files/{id}/metadata [get]
 func (h *FileHandler) GetMetadata(c *gin.Context) {
 	val, ok := c.Get("user")
 	if !ok {
@@ -180,6 +226,18 @@ func (h *FileHandler) GetMetadata(c *gin.Context) {
 }
 
 // Delete deletes a file.
+// @Summary      Delete a file
+// @Description  Deletes the file record from database and vector database. If there are no other references, it deletes the physical file.
+// @Tags         files
+// @Produce      json
+// @Param        id    path      string  true  "File ID"
+// @Success      200   {object}  map[string]interface{} "Message and physical_deleted status"
+// @Failure      401   {object}  map[string]string "Unauthorized"
+// @Failure      403   {object}  map[string]string "Forbidden (access denied)"
+// @Failure      404   {object}  map[string]string "File not found"
+// @Failure      500   {object}  map[string]string "Delete error"
+// @Security     BasicAuth
+// @Router       /files/{id} [delete]
 func (h *FileHandler) Delete(c *gin.Context) {
 	val, ok := c.Get("user")
 	if !ok {
@@ -210,6 +268,18 @@ func (h *FileHandler) Delete(c *gin.Context) {
 }
 
 // Search performs a semantic search over files.
+// @Summary      Search files semantically
+// @Description  Generates an embedding query and performs vector search for similar documents, returning metadata and similarity scores.
+// @Tags         files
+// @Produce      json
+// @Param        q      query     string  true   "Search query text"
+// @Param        limit  query     int     false  "Max search results limit (default 5)"
+// @Success      200    {array}   contract.SearchResponseItem
+// @Failure      400    {object}  map[string]string "Missing query parameter 'q'"
+// @Failure      401    {object}  map[string]string "Unauthorized"
+// @Failure      500    {object}  map[string]string "Search failed"
+// @Security     BasicAuth
+// @Router       /files/search [get]
 func (h *FileHandler) Search(c *gin.Context) {
 	val, ok := c.Get("user")
 	if !ok {

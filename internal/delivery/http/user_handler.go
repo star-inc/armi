@@ -19,6 +19,15 @@ func NewUserHandler(userUsecase *usecase.UserUsecase) *UserHandler {
 }
 
 // Register registers a new user.
+// @Summary      Register a new user
+// @Description  Register a new user in the system using Argon2id for password hashing.
+// @Tags         users
+// @Accept       json
+// @Produce      json
+// @Param        request  body      contract.RegisterRequest  true  "User Registration Details"
+// @Success      200      {object}  contract.RegisterResponse
+// @Failure      400      {object}  map[string]string "Invalid input or registration error"
+// @Router       /users/register [post]
 func (h *UserHandler) Register(c *gin.Context) {
 	var req contract.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

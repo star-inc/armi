@@ -4,6 +4,10 @@ import (
 	"log/slog"
 
 	"github.com/gin-gonic/gin"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
+
+	_ "github.com/supersonictw/armi/docs"
 	"github.com/supersonictw/armi/internal/usecase"
 	"github.com/supersonictw/armi/pkgs/file"
 )
@@ -21,6 +25,8 @@ func NewServer(
 ) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
+
+	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	s := &Server{
 		Engine: r,

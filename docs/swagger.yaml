@@ -1,0 +1,362 @@
+basePath: /api/v1
+definitions:
+  contract.FileResponse:
+    properties:
+      content_type:
+        type: string
+      created_at:
+        type: string
+      filename:
+        type: string
+      hash:
+        type: string
+      id:
+        type: string
+      owner_id:
+        type: string
+      size:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+  contract.RegisterRequest:
+    properties:
+      password:
+        type: string
+      username:
+        type: string
+    required:
+    - password
+    - username
+    type: object
+  contract.RegisterResponse:
+    properties:
+      created_at:
+        type: string
+      id:
+        type: string
+      username:
+        type: string
+    type: object
+  contract.SearchResponseItem:
+    properties:
+      content_type:
+        type: string
+      created_at:
+        type: string
+      distance:
+        type: number
+      filename:
+        type: string
+      hash:
+        type: string
+      id:
+        type: string
+      owner_id:
+        type: string
+      score:
+        type: number
+      size:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: Armi PDF/Word/Excel/PPT/TXT/RTF 檔案管理器 RESTful API。
+  title: Armi File Manager API
+  version: "1.0"
+paths:
+  /files:
+    get:
+      description: Retrieves list of all metadata records of files owned by the authenticated
+        user.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/contract.FileResponse'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Database error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BasicAuth: []
+      summary: List user files
+      tags:
+      - files
+    post:
+      consumes:
+      - multipart/form-data
+      description: Uploads a new file (PDF, Word, Excel, PPT, TXT, RTF) with upload
+        progress reporting, SHA3-256 deduplication check, and embedding generation.
+      parameters:
+      - description: The document file to upload
+        in: formData
+        name: file
+        required: true
+        type: file
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/contract.FileResponse'
+        "400":
+          description: Missing file or invalid request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: File conflict (duplicate filename or hash)
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BasicAuth: []
+      summary: Upload a document file
+      tags:
+      - files
+  /files/{id}:
+    delete:
+      description: Deletes the file record from database and vector database. If there
+        are no other references, it deletes the physical file.
+      parameters:
+      - description: File ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Message and physical_deleted status
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: Forbidden (access denied)
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: File not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Delete error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BasicAuth: []
+      summary: Delete a file
+      tags:
+      - files
+    get:
+      description: Downloads a file's raw content by its unique file record ID.
+      parameters:
+      - description: File ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: The downloaded file contents
+          schema:
+            type: file
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: Forbidden (access denied)
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: File not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Download error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BasicAuth: []
+      summary: Download a file
+      tags:
+      - files
+  /files/{id}/metadata:
+    get:
+      description: Fetches the database record metadata and physical storage (OpenDAL)
+        stat information of the specified file.
+      parameters:
+      - description: File ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: File metadata wrapper (database_record and physical_storage)
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: Forbidden (access denied)
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: File not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Metadata error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BasicAuth: []
+      summary: Get file metadata
+      tags:
+      - files
+  /files/search:
+    get:
+      description: Generates an embedding query and performs vector search for similar
+        documents, returning metadata and similarity scores.
+      parameters:
+      - description: Search query text
+        in: query
+        name: q
+        required: true
+        type: string
+      - description: Max search results limit (default 5)
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/contract.SearchResponseItem'
+            type: array
+        "400":
+          description: Missing query parameter 'q'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Search failed
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BasicAuth: []
+      summary: Search files semantically
+      tags:
+      - files
+  /users/register:
+    post:
+      consumes:
+      - application/json
+      description: Register a new user in the system using Argon2id for password hashing.
+      parameters:
+      - description: User Registration Details
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/contract.RegisterRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/contract.RegisterResponse'
+        "400":
+          description: Invalid input or registration error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Register a new user
+      tags:
+      - users
+securityDefinitions:
+  BasicAuth:
+    type: basic
+swagger: "2.0"
