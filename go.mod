@@ -1,6 +1,6 @@
 module github.com/supersonictw/armi
 
-go 1.25.5
+go 1.26.3
 
 require (
 	github.com/apache/opendal-go-services/fs v0.1.15
