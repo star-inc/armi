@@ -64,6 +64,9 @@ func InitConfig() {
 	viper.SetDefault("rabbitmq.url", "amqp://guest:guest@localhost:5672/")
 	viper.SetDefault("rabbitmq.exchange", "armi.events")
 	viper.SetDefault("rabbitmq.routing_key", "user.events")
+	viper.SetDefault("rabbitmq.broadcast_exchange", "armi.events.broadcast") // fanout, for progress events
+	viper.SetDefault("rabbitmq.embedding_queue", "armi.embedding.jobs")      // durable work queue
+
 
 	// NLP Search and LLM Defaults
 	viper.SetDefault("search.nlp_expansion.enabled", true)

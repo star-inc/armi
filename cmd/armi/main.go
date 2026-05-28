@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"log/slog"
 
@@ -73,8 +74,7 @@ func main() {
 	// 6. Initialize RabbitMQ Event Publisher
 	publisher, err := rabbitmq.NewRabbitMQPublisher()
 	if err != nil {
-		slog.Warn("RabbitMQ initialization failed, event sending will be skipped", "error", err)
-		// Fallback to dummy publisher or continue if rabbitmq fails
+		slog.Warn("RabbitMQ event publisher initialization failed, event sending will be skipped", "error", err)
 	}
 	defer func() {
 		if publisher != nil {
@@ -84,13 +84,45 @@ func main() {
 		}
 	}()
 
+	// 6.5 Initialize RabbitMQ Embedding Job Publisher
+	// When RabbitMQ is unavailable, jobPublisher.IsAvailable() returns false and
+	// the upload usecase falls back to synchronous embedding automatically.
+	jobPublisher, err := rabbitmq.NewRabbitMQJobPublisher()
+	if err != nil {
+		slog.Warn("RabbitMQ job publisher initialization failed, upload will embed synchronously", "error", err)
+	}
+	defer func() {
+		if jobPublisher != nil {
+			if closeErr := jobPublisher.Close(); closeErr != nil {
+				slog.Error("failed to close job publisher", "error", closeErr)
+			}
+		}
+	}()
+
+	// 6.6 Initialize and start Embedding Consumer (no-op when RabbitMQ is disabled)
+	consumer, err := rabbitmq.NewEmbeddingConsumer(embedder, vectorDB, store, publisher)
+	if err != nil {
+		slog.Warn("RabbitMQ embedding consumer initialization failed, falling back to sync embedding", "error", err)
+	}
+	if consumer != nil {
+		consumerCtx, cancelConsumer := context.WithCancel(context.Background())
+		defer func() {
+			cancelConsumer()
+			if closeErr := consumer.Close(); closeErr != nil {
+				slog.Error("failed to close embedding consumer", "error", closeErr)
+			}
+		}()
+		go consumer.Start(consumerCtx)
+		slog.Info("Embedding consumer goroutine started")
+	}
+
 	// 7. Instantiate Repositories
 	userRepo := database.NewGormUserRepository(db)
 	fileRepo := database.NewGormFileRepository(db)
 
 	// 8. Instantiate Use Cases (Business Logic Layers)
 	userUsecase := usecase.NewUserUsecase(userRepo, publisher)
-	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher)
+	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher, jobPublisher)
 
 	// 9. Instantiate and Run HTTP server (Delivery Layer)
 	server := httpDelivery.NewServer(userUsecase, fileUsecase, publisher)

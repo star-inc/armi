@@ -15,13 +15,15 @@ import (
 	"github.com/supersonictw/armi/pkgs/file"
 )
 
+
 type FileUsecase struct {
-	fileRepo  file.FileRepository
-	storage   file.Storage
-	embedder  file.Embedder
-	vectorDB  file.VectorDB
-	llm       file.LLM
-	publisher file.EventPublisher
+	fileRepo     file.FileRepository
+	storage      file.Storage
+	embedder     file.Embedder
+	vectorDB     file.VectorDB
+	llm          file.LLM
+	publisher    file.EventPublisher
+	jobPublisher file.EmbeddingJobPublisher // nil when RabbitMQ is unavailable
 }
 
 func NewFileUsecase(
@@ -31,14 +33,16 @@ func NewFileUsecase(
 	vectorDB file.VectorDB,
 	llm file.LLM,
 	publisher file.EventPublisher,
+	jobPublisher file.EmbeddingJobPublisher,
 ) *FileUsecase {
 	return &FileUsecase{
-		fileRepo:  fileRepo,
-		storage:   storage,
-		embedder:  embedder,
-		vectorDB:  vectorDB,
-		llm:       llm,
-		publisher: publisher,
+		fileRepo:     fileRepo,
+		storage:      storage,
+		embedder:     embedder,
+		vectorDB:     vectorDB,
+		llm:          llm,
+		publisher:    publisher,
+		jobPublisher: jobPublisher,
 	}
 }
 
@@ -134,38 +138,11 @@ func (uc *FileUsecase) Upload(
 		return nil, err
 	}
 
-	// Vector Embedding (deduplicated or new)
-	var vectorCopied bool
-	if globalCount > 0 {
-		// Find existing file record ID with same hash, copy embedding
-		existingRecord, err := uc.fileRepo.GetByHash(ctx, sha3Hash)
-		if err == nil && existingRecord != nil {
-			err = uc.vectorDB.Copy(ctx, existingRecord.ID, fileID)
-			if err == nil {
-				vectorCopied = true
-				slog.Info("vector embedding copied successfully (deduplicated)", "src_id", existingRecord.ID, "dest_id", fileID)
-			} else {
-				slog.Warn("failed to copy existing vector, falling back to embedding generation", "error", err)
-			}
-		}
-	}
-
-	if !vectorCopied {
-		// New file vector flow
-		text, extractErr := extractor.ExtractText(content, filename)
-		if extractErr != nil {
-			slog.Warn("failed to extract text from file, skipping vector generation", "error", extractErr)
-		} else if text != "" {
-			embeddingVal, embedErr := uc.embedder.Embed(ctx, text)
-			if embedErr != nil {
-				slog.Warn("failed to generate embedding from extracted text, skipping vector insert", "error", embedErr)
-			} else {
-				err = uc.vectorDB.Insert(ctx, fileID, embeddingVal)
-				if err != nil {
-					slog.Warn("failed to insert vector into vector database", "error", err)
-				}
-			}
-		}
+	// Vector Embedding — async via RabbitMQ when available, sync fallback otherwise.
+	if uc.jobPublisher != nil && uc.jobPublisher.IsAvailable() {
+		uc.dispatchEmbeddingJob(ctx, fileID, userID, sha3Hash, filename, contentType, globalCount)
+	} else {
+		uc.embedSync(ctx, fileID, userID, sha3Hash, filename, contentType, content, globalCount)
 	}
 
 	uc.publisher.PublishEvent(ctx, "file.uploaded", userID, map[string]interface{}{
@@ -178,6 +155,88 @@ func (uc *FileUsecase) Upload(
 
 	resp := toFileResponse(newRecord)
 	return &resp, nil
+}
+
+// dispatchEmbeddingJob enqueues an EmbeddingJob to the RabbitMQ work queue.
+func (uc *FileUsecase) dispatchEmbeddingJob(
+	ctx context.Context,
+	fileID, userID, sha3Hash, filename, contentType string,
+	globalCount int64,
+) {
+	job := contract.EmbeddingJob{
+		JobID:       xid.New().String(),
+		FileID:      fileID,
+		UserID:      userID,
+		StorageKey:  "sha3-256-" + sha3Hash,
+		Filename:    filename,
+		ContentType: contentType,
+	}
+
+	if globalCount > 0 {
+		// Deduplication: look up the existing record's ID so the consumer can Copy.
+		existing, err := uc.fileRepo.GetByHash(ctx, sha3Hash)
+		if err == nil && existing != nil {
+			job.IsCopy = true
+			job.SrcFileID = existing.ID
+		}
+	}
+
+	if err := uc.jobPublisher.PublishEmbeddingJob(ctx, job); err != nil {
+		slog.Warn("failed to enqueue embedding job, falling back to sync embedding", "job_id", job.JobID, "error", err)
+		uc.publisher.PublishEvent(ctx, "embedding.queue_error", userID, map[string]interface{}{
+			"job_id": job.JobID,
+			"error":  err.Error(),
+		})
+		// Sync fallback: content is no longer available here, skip silently.
+		// The file is still saved; embedding can be retried later.
+		return
+	}
+
+	slog.Info("embedding job enqueued", "job_id", job.JobID, "file_id", fileID)
+	uc.publisher.PublishEvent(ctx, "embedding.queued", userID, map[string]interface{}{
+		"job_id":  job.JobID,
+		"file_id": fileID,
+	})
+}
+
+// embedSync performs embedding in the same goroutine (used when RabbitMQ is unavailable).
+func (uc *FileUsecase) embedSync(
+	ctx context.Context,
+	fileID, userID, sha3Hash, filename, contentType string,
+	content []byte,
+	globalCount int64,
+) {
+	var vectorCopied bool
+	if globalCount > 0 {
+		existingRecord, err := uc.fileRepo.GetByHash(ctx, sha3Hash)
+		if err == nil && existingRecord != nil {
+			if copyErr := uc.vectorDB.Copy(ctx, existingRecord.ID, fileID); copyErr == nil {
+				vectorCopied = true
+				slog.Info("vector embedding copied (deduplicated, sync)", "src_id", existingRecord.ID, "dest_id", fileID)
+			} else {
+				slog.Warn("failed to copy existing vector, falling back to embedding generation (sync)", "error", copyErr)
+			}
+		}
+	}
+
+	if !vectorCopied {
+		text, extractErr := extractor.ExtractText(content, filename)
+		if extractErr != nil {
+			slog.Warn("failed to extract text from file, skipping vector generation (sync)", "error", extractErr)
+			return
+		}
+		if text == "" {
+			return
+		}
+		embeddingVal, embedErr := uc.embedder.Embed(ctx, text)
+		if embedErr != nil {
+			slog.Warn("failed to generate embedding (sync)", "error", embedErr)
+			return
+		}
+		if err := uc.vectorDB.Insert(ctx, fileID, embeddingVal); err != nil {
+			slog.Warn("failed to insert vector (sync)", "error", err)
+		}
+	}
 }
 
 func (uc *FileUsecase) List(ctx context.Context, userID string) ([]contract.FileResponse, error) {
