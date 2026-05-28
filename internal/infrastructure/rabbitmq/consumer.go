@@ -3,6 +3,7 @@ package rabbitmq
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -206,8 +207,9 @@ func (c *EmbeddingConsumer) handleEmbed(ctx context.Context, job contract.Embedd
 	// Extract text
 	text, err := extractor.ExtractText(data, job.Filename)
 	if err != nil {
-		slog.Warn("embedding consumer: text extraction failed, skipping embedding", "job_id", job.JobID, "error", err)
-		return nil // not a fatal error; file may be non-extractable
+		// Text extraction failure is a system-level error (e.g. corrupted file, unsupported format).
+		// Return the error so handle() publishes embedding.failed as an alert.
+		return fmt.Errorf("text extraction failed: %w", err)
 	}
 	if text == "" {
 		slog.Info("embedding consumer: no text extracted, skipping embedding", "job_id", job.JobID)
@@ -228,6 +230,7 @@ func (c *EmbeddingConsumer) handleEmbed(ctx context.Context, job contract.Embedd
 	// Generate embedding
 	embeddingVal, err := c.embedder.Embed(ctx, text)
 	if err != nil {
+		slog.Error("embedding provider error (async)", "job_id", job.JobID, "file_id", job.FileID, "error", err)
 		return err
 	}
 

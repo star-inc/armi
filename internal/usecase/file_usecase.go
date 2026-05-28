@@ -5,6 +5,7 @@ import (
 	"crypto/sha3"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 
@@ -142,7 +143,18 @@ func (uc *FileUsecase) Upload(
 	if uc.jobPublisher != nil && uc.jobPublisher.IsAvailable() {
 		uc.dispatchEmbeddingJob(ctx, fileID, userID, sha3Hash, filename, contentType, globalCount)
 	} else {
-		uc.embedSync(ctx, fileID, userID, sha3Hash, filename, contentType, content, globalCount)
+		if embedErr := uc.embedSync(ctx, fileID, userID, sha3Hash, filename, contentType, content, globalCount); embedErr != nil {
+			slog.Error("embedding failed (sync), rolling back file record", "file_id", fileID, "error", embedErr)
+			uc.publisher.PublishEvent(ctx, "embedding.failed", userID, map[string]interface{}{
+				"file_id": fileID,
+				"error":   embedErr.Error(),
+			})
+			// Roll back: delete the DB record so the upload appears as if it never happened.
+			if delErr := uc.fileRepo.Delete(ctx, fileID); delErr != nil {
+				slog.Error("failed to roll back file record after embedding error", "file_id", fileID, "error", delErr)
+			}
+			return nil, fmt.Errorf("embedding failed: %w", embedErr)
+		}
 	}
 
 	uc.publisher.PublishEvent(ctx, "file.uploaded", userID, map[string]interface{}{
@@ -200,12 +212,13 @@ func (uc *FileUsecase) dispatchEmbeddingJob(
 }
 
 // embedSync performs embedding in the same goroutine (used when RabbitMQ is unavailable).
+// Returns an error if embedding fails; the caller is responsible for rolling back the upload.
 func (uc *FileUsecase) embedSync(
 	ctx context.Context,
 	fileID, userID, sha3Hash, filename, contentType string,
 	content []byte,
 	globalCount int64,
-) {
+) error {
 	var vectorCopied bool
 	if globalCount > 0 {
 		existingRecord, err := uc.fileRepo.GetByHash(ctx, sha3Hash)
@@ -222,21 +235,22 @@ func (uc *FileUsecase) embedSync(
 	if !vectorCopied {
 		text, extractErr := extractor.ExtractText(content, filename)
 		if extractErr != nil {
-			slog.Warn("failed to extract text from file, skipping vector generation (sync)", "error", extractErr)
-			return
+			return fmt.Errorf("text extraction failed: %w", extractErr)
 		}
 		if text == "" {
-			return
+			// No extractable text — not a fatal error, skip silently.
+			return nil
 		}
 		embeddingVal, embedErr := uc.embedder.Embed(ctx, text)
 		if embedErr != nil {
-			slog.Warn("failed to generate embedding (sync)", "error", embedErr)
-			return
+			slog.Error("embedding provider error (sync)", "file_id", fileID, "error", embedErr)
+			return fmt.Errorf("embedding model error: %w", embedErr)
 		}
 		if err := uc.vectorDB.Insert(ctx, fileID, embeddingVal); err != nil {
-			slog.Warn("failed to insert vector (sync)", "error", err)
+			return fmt.Errorf("vector insert failed: %w", err)
 		}
 	}
+	return nil
 }
 
 func (uc *FileUsecase) List(ctx context.Context, userID string) ([]contract.FileResponse, error) {
