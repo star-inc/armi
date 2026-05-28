@@ -1,0 +1,92 @@
+package database
+
+import (
+	"fmt"
+	"log/slog"
+	"time"
+
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+	"github.com/spf13/viper"
+	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+)
+
+// gormUser represents the database schema for users.
+type gormUser struct {
+	ID           string    `gorm:"primaryKey;type:varchar(20)"`
+	Username     string    `gorm:"uniqueIndex;type:varchar(255)"`
+	PasswordHash string    `gorm:"type:varchar(255)"`
+	CreatedAt    time.Time `gorm:"autoCreateTime"`
+	UpdatedAt    time.Time `gorm:"autoUpdateTime"`
+}
+
+// TableName overrides the table name for gormUser to "users"
+func (gormUser) TableName() string {
+	return "users"
+}
+
+// gormFileRecord represents the database schema for file records.
+type gormFileRecord struct {
+	ID          string    `gorm:"primaryKey;type:varchar(20)"`
+	Filename    string    `gorm:"type:varchar(255)"`
+	Hash        string    `gorm:"index;type:varchar(64)"`
+	Size        int64     `gorm:"type:bigint"`
+	ContentType string    `gorm:"type:varchar(255)"`
+	OwnerID     string    `gorm:"index;type:varchar(20)"`
+	CreatedAt   time.Time `gorm:"autoCreateTime"`
+	UpdatedAt   time.Time `gorm:"autoUpdateTime"`
+}
+
+// TableName overrides the table name for gormFileRecord to "file_records"
+func (gormFileRecord) TableName() string {
+	return "file_records"
+}
+
+// DB is the shared GORM database instance.
+var DB *gorm.DB
+
+// InitDB initializes GORM (SQLite or Postgres) and runs auto migration.
+func InitDB() (*gorm.DB, error) {
+	driver := viper.GetString("db.driver")
+	var dialector gorm.Dialector
+
+	if driver == "sqlite" {
+		sqlite_vec.Auto()
+		dbPath := viper.GetString("db.sqlite.path")
+		if dbPath == "" {
+			dbPath = "armi.db"
+		}
+		slog.Info("Connecting to SQLite database", "path", dbPath)
+		dialector = sqlite.Open(dbPath)
+	} else if driver == "postgres" {
+		dsn := viper.GetString("db.postgres.dsn")
+		slog.Info("Connecting to PostgreSQL database")
+		dialector = postgres.Open(dsn)
+	} else {
+		return nil, fmt.Errorf("unsupported database driver: %s", driver)
+	}
+
+	db, err := gorm.Open(dialector, &gorm.Config{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	// Auto migrate the GORM schema models
+	err = db.AutoMigrate(&gormUser{}, &gormFileRecord{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to auto migrate database: %w", err)
+	}
+
+	// If using SQLite and sqlite-vec, create virtual table
+	if driver == "sqlite" && viper.GetString("vector.provider") == "sqlite-vec" {
+		err = db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS file_embeddings USING vec0(file_id TEXT PRIMARY KEY, embedding FLOAT[768])").Error
+		if err != nil {
+			return nil, fmt.Errorf("failed to create sqlite-vec virtual table: %w", err)
+		}
+		slog.Info("Initialized sqlite-vec virtual table 'file_embeddings'")
+	}
+
+	DB = db
+	return db, nil
+}

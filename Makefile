@@ -11,5 +11,5 @@ clean-deps:
 	go clean -cache
 
 dev:
-	@go install github.com/cosmtrek/air@latest
+	@go install github.com/air-verse/air@latest
 	cd $(TARGET_DIRECTORY) && air
