@@ -74,4 +74,17 @@ func InitConfig() {
 	viper.SetDefault("llm.model", "gpt-4o-mini")
 	viper.SetDefault("llm.openai.api_key", "")
 	viper.SetDefault("llm.openai.base_url", "https://api.openai.com/v1")
+
+	// Auth Scheme Defaults
+	// Accepted values: "basic", "bearer", "both"
+	viper.SetDefault("auth.scheme", "both")
+
+	// JWT Defaults
+	viper.SetDefault("jwt.issuer", "")
+	viper.SetDefault("jwt.audience", "")
+	// algorithms: comma-separated list of: hs256, rs256, es256
+	viper.SetDefault("jwt.algorithms", []string{"hs256"})
+	viper.SetDefault("jwt.hs256.secret", "")
+	viper.SetDefault("jwt.rs256.public_key_pem", "")
+	viper.SetDefault("jwt.es256.public_key_pem", "")
 }

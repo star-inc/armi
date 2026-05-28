@@ -7,57 +7,162 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/supersonictw/armi/internal/infrastructure/jwtauth"
 	"github.com/supersonictw/armi/internal/usecase"
 	"github.com/supersonictw/armi/pkgs/file"
 )
 
-// BasicAuthMiddleware verifies basic authentication using the UserUsecase.
-func BasicAuthMiddleware(userUsecase *usecase.UserUsecase, publisher file.EventPublisher) gin.HandlerFunc {
+// AuthMiddleware handles both HTTP Basic Auth and JWT Bearer authentication.
+// The accepted scheme is controlled by the jwtauth.AuthScheme parameter:
+//   - AuthSchemeBasic  — only Basic Auth is accepted
+//   - AuthSchemeBearer — only Bearer JWT is accepted
+//   - AuthSchemeBoth   — either scheme is accepted (default)
+//
+// For Bearer tokens the JWT is validated by the provided Verifier (may be nil
+// when scheme is AuthSchemeBasic, in which case Bearer is always rejected).
+func AuthMiddleware(
+	scheme jwtauth.AuthScheme,
+	verifier *jwtauth.Verifier,
+	userUsecase *usecase.UserUsecase,
+	publisher file.EventPublisher,
+) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		username, password, hasAuth := c.Request.BasicAuth()
 		ip := c.ClientIP()
 		path := c.Request.URL.Path
 		method := c.Request.Method
 
-		if !hasAuth {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
 			slog.Warn("request missing Authorization header", "ip", ip, "path", path)
 			publisher.PublishEvent(c.Request.Context(), "user.auth_failed", "", map[string]interface{}{
-				"username": "",
-				"ip":       ip,
-				"path":     path,
-				"reason":   "missing authorization header",
+				"ip":     ip,
+				"path":   path,
+				"reason": "missing authorization header",
 			})
-			c.Header("WWW-Authenticate", `Basic realm="armi"`)
+			c.Header("WWW-Authenticate", `Basic realm="armi", Bearer realm="armi"`)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			return
 		}
 
-		dbUser, err := userUsecase.Authenticate(c.Request.Context(), username, password)
-		if err != nil {
-			slog.Warn("auth failed", "username", username, "ip", ip, "path", path, "error", err)
-			publisher.PublishEvent(c.Request.Context(), "user.auth_failed", "", map[string]interface{}{
-				"username": username,
-				"ip":       ip,
-				"path":     path,
-				"reason":   err.Error(),
-			})
-			c.Header("WWW-Authenticate", `Basic realm="armi"`)
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		switch {
+		case strings.HasPrefix(authHeader, "Basic "):
+			handleBasicAuth(c, scheme, userUsecase, publisher, ip, path, method, authHeader)
+
+		case strings.HasPrefix(authHeader, "Bearer "):
+			handleBearerAuth(c, scheme, verifier, userUsecase, publisher, ip, path, method, authHeader)
+
+		default:
+			slog.Warn("unsupported Authorization scheme", "ip", ip, "path", path, "header_prefix", strings.SplitN(authHeader, " ", 2)[0])
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unsupported authorization scheme"})
 			return
 		}
+	}
+}
 
-		// Set the domain User entity in gin context
-		c.Set("user", dbUser)
+// handleBasicAuth validates HTTP Basic Auth credentials.
+func handleBasicAuth(
+	c *gin.Context,
+	scheme jwtauth.AuthScheme,
+	userUsecase *usecase.UserUsecase,
+	publisher file.EventPublisher,
+	ip, path, method, _ string,
+) {
+	if scheme == jwtauth.AuthSchemeBearer {
+		slog.Warn("Basic Auth rejected: server requires Bearer only", "ip", ip, "path", path)
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "basic auth not accepted, use bearer token"})
+		return
+	}
 
-		publisher.PublishEvent(c.Request.Context(), "user.auth_success", dbUser.ID, map[string]interface{}{
-			"username": dbUser.Username,
+	username, password, ok := c.Request.BasicAuth()
+	if !ok {
+		slog.Warn("malformed Basic Auth header", "ip", ip, "path", path)
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "malformed basic auth header"})
+		return
+	}
+
+	dbUser, err := userUsecase.Authenticate(c.Request.Context(), username, password)
+	if err != nil {
+		slog.Warn("basic auth failed", "username", username, "ip", ip, "path", path, "error", err)
+		publisher.PublishEvent(c.Request.Context(), "user.auth_failed", "", map[string]interface{}{
+			"username": username,
 			"ip":       ip,
 			"path":     path,
-			"method":   method,
+			"reason":   err.Error(),
 		})
-
-		c.Next()
+		c.Header("WWW-Authenticate", `Basic realm="armi"`)
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
 	}
+
+	c.Set("user", dbUser)
+	publisher.PublishEvent(c.Request.Context(), "user.auth_success", dbUser.ID, map[string]interface{}{
+		"method":    "basic",
+		"username":  dbUser.Username,
+		"ip":        ip,
+		"path":      path,
+		"http_verb": method,
+	})
+	c.Next()
+}
+
+// handleBearerAuth validates a JWT Bearer token and resolves the user by sub claim.
+func handleBearerAuth(
+	c *gin.Context,
+	scheme jwtauth.AuthScheme,
+	verifier *jwtauth.Verifier,
+	userUsecase *usecase.UserUsecase,
+	publisher file.EventPublisher,
+	ip, path, method, authHeader string,
+) {
+	if scheme == jwtauth.AuthSchemeBasic {
+		slog.Warn("Bearer token rejected: server requires Basic only", "ip", ip, "path", path)
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "bearer token not accepted, use basic auth"})
+		return
+	}
+
+	if verifier == nil {
+		slog.Error("Bearer auth attempted but JWT verifier is not configured", "ip", ip, "path", path)
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "bearer authentication is not configured"})
+		return
+	}
+
+	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+	claims, err := verifier.Verify(tokenStr)
+	if err != nil {
+		slog.Warn("bearer token validation failed", "ip", ip, "path", path, "error", err)
+		publisher.PublishEvent(c.Request.Context(), "user.auth_failed", "", map[string]interface{}{
+			"ip":     ip,
+			"path":   path,
+			"reason": err.Error(),
+		})
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
+		return
+	}
+
+	// sub = armi user ID; look up the user to ensure they still exist.
+	dbUser, err := userUsecase.GetByID(c.Request.Context(), claims.Subject)
+	if err != nil {
+		slog.Warn("bearer auth: user not found for sub claim",
+			"sub", claims.Subject, "ip", ip, "path", path, "error", err)
+		publisher.PublishEvent(c.Request.Context(), "user.auth_failed", "", map[string]interface{}{
+			"sub":    claims.Subject,
+			"ip":     ip,
+			"path":   path,
+			"reason": "user not found",
+		})
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	c.Set("user", dbUser)
+	publisher.PublishEvent(c.Request.Context(), "user.auth_success", dbUser.ID, map[string]interface{}{
+		"method":    "bearer",
+		"username":  dbUser.Username,
+		"ip":        ip,
+		"path":      path,
+		"http_verb": method,
+	})
+	c.Next()
 }
 
 // FileValidationMiddleware validates that the uploaded file has a valid extension.

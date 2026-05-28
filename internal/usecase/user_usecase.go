@@ -82,3 +82,15 @@ func (uc *UserUsecase) Authenticate(ctx context.Context, username, password stri
 
 	return u, nil
 }
+
+// GetByID looks up a user by their ID (used for JWT sub claim resolution).
+func (uc *UserUsecase) GetByID(ctx context.Context, id string) (*user.User, error) {
+	u, err := uc.userRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if u == nil {
+		return nil, errors.New("user not found")
+	}
+	return u, nil
+}

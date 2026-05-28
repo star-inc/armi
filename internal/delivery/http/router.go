@@ -8,6 +8,7 @@ import (
 	ginSwagger "github.com/swaggo/gin-swagger"
 
 	_ "github.com/supersonictw/armi/docs"
+	"github.com/supersonictw/armi/internal/infrastructure/jwtauth"
 	"github.com/supersonictw/armi/internal/usecase"
 	"github.com/supersonictw/armi/pkgs/file"
 )
@@ -22,6 +23,8 @@ func NewServer(
 	userUsecase *usecase.UserUsecase,
 	fileUsecase *usecase.FileUsecase,
 	publisher file.EventPublisher,
+	authScheme jwtauth.AuthScheme,
+	jwtVerifier *jwtauth.Verifier, // nil when JWT is disabled (Basic-only mode)
 ) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
@@ -41,7 +44,7 @@ func NewServer(
 		api.POST("/users/register", userHandler.Register)
 
 		auth := api.Group("/")
-		auth.Use(BasicAuthMiddleware(userUsecase, publisher))
+		auth.Use(AuthMiddleware(authScheme, jwtVerifier, userUsecase, publisher))
 		{
 			auth.POST("/files", FileValidationMiddleware(publisher), fileHandler.Upload)
 			auth.GET("/files", fileHandler.List)

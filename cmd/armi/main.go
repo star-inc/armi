@@ -10,6 +10,7 @@ import (
 	httpDelivery "github.com/supersonictw/armi/internal/delivery/http"
 	"github.com/supersonictw/armi/internal/infrastructure/database"
 	"github.com/supersonictw/armi/internal/infrastructure/embedding"
+	"github.com/supersonictw/armi/internal/infrastructure/jwtauth"
 	"github.com/supersonictw/armi/internal/infrastructure/llm"
 	"github.com/supersonictw/armi/internal/infrastructure/rabbitmq"
 	"github.com/supersonictw/armi/internal/infrastructure/storage"
@@ -22,6 +23,9 @@ import (
 // @description     Armi PDF/Word/Excel/PPT/TXT/RTF 檔案管理器 RESTful API。
 // @BasePath        /api/v1
 // @securityDefinitions.basic  BasicAuth
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
 func main() {
 	// 1. Initialize Configuration (Viper)
 	config.InitConfig()
@@ -124,8 +128,42 @@ func main() {
 	userUsecase := usecase.NewUserUsecase(userRepo, publisher)
 	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher, jobPublisher)
 
-	// 9. Instantiate and Run HTTP server (Delivery Layer)
-	server := httpDelivery.NewServer(userUsecase, fileUsecase, publisher)
+	// 9. Initialize JWT Verifier (optional — skipped when jwt.issuer is not configured)
+	authScheme := jwtauth.ParseAuthScheme(viper.GetString("auth.scheme"))
+	var jwtVerifier *jwtauth.Verifier
+
+	if viper.GetString("jwt.issuer") != "" {
+		algStrs := viper.GetStringSlice("jwt.algorithms")
+		var algorithms []jwtauth.Algorithm
+		for _, algStr := range algStrs {
+			alg, err := jwtauth.ParseAlgorithm(algStr)
+			if err != nil {
+				log.Fatalf("invalid JWT algorithm in config: %v", err)
+			}
+			algorithms = append(algorithms, alg)
+		}
+
+		verifier, err := jwtauth.NewVerifier(jwtauth.Config{
+			Algorithms:        algorithms,
+			Issuer:            viper.GetString("jwt.issuer"),
+			Audience:          viper.GetString("jwt.audience"),
+			HS256Secret:       viper.GetString("jwt.hs256.secret"),
+			RS256PublicKeyPEM: viper.GetString("jwt.rs256.public_key_pem"),
+			ES256PublicKeyPEM: viper.GetString("jwt.es256.public_key_pem"),
+		})
+		if err != nil {
+			log.Fatalf("failed to initialize JWT verifier: %v", err)
+		}
+		jwtVerifier = verifier
+	} else {
+		slog.Info("JWT not configured (jwt.issuer is empty), Bearer auth disabled")
+		if authScheme == jwtauth.AuthSchemeBearer {
+			log.Fatal("auth.scheme is 'bearer' but jwt.issuer is not configured")
+		}
+	}
+
+	// 10. Instantiate and Run HTTP server (Delivery Layer)
+	server := httpDelivery.NewServer(userUsecase, fileUsecase, publisher, authScheme, jwtVerifier)
 
 	host := viper.GetString("HOST")
 	port := viper.GetString("PORT")
