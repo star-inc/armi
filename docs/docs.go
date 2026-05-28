@@ -139,7 +139,7 @@ const docTemplate = `{
                         "BasicAuth": []
                     }
                 ],
-                "description": "Generates an embedding query and performs vector search for similar documents, returning metadata and similarity scores.",
+                "description": "Generates an embedding query and performs vector search for similar documents, returning metadata, similarity scores and source queries.",
                 "produces": [
                     "application/json"
                 ],
@@ -159,6 +159,18 @@ const docTemplate = `{
                         "type": "integer",
                         "description": "Max search results limit (default 5)",
                         "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Enable NLP semantic search query expansion",
+                        "name": "nlp_expansion",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Number of alternative queries to generate (default 3)",
+                        "name": "expansion_num",
                         "in": "query"
                     }
                 ],
@@ -412,6 +424,77 @@ const docTemplate = `{
                 }
             }
         },
+        "/mcp": {
+            "get": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "description": "Establishes a Streamable HTTP (SSE) connection channel.",
+                "produces": [
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "Connect to MCP Server (SSE)",
+                "responses": {
+                    "200": {
+                        "description": "SSE Connection established",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/mcp/message": {
+            "post": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "description": "Sends JSON-RPC 2.0 request messages (like initialize, tools/list, tools/call).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "Post message to MCP Server",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Session ID (SSE Client)",
+                        "name": "sessionId",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "description": "JSON-RPC Request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Message accepted",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/users/register": {
             "post": {
                 "description": "Register a new user in the system using Argon2id for password hashing.",
@@ -544,6 +627,9 @@ const docTemplate = `{
                 },
                 "size": {
                     "type": "integer"
+                },
+                "source_query": {
+                    "type": "string"
                 },
                 "updated_at": {
                     "type": "string"

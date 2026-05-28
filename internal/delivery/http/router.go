@@ -34,6 +34,7 @@ func NewServer(
 
 	userHandler := NewUserHandler(userUsecase)
 	fileHandler := NewFileHandler(fileUsecase, publisher)
+	mcpHandler := NewMCPHandler(fileUsecase)
 
 	api := r.Group("/api/v1")
 	{
@@ -48,6 +49,10 @@ func NewServer(
 			auth.GET("/files/:id/metadata", fileHandler.GetMetadata)
 			auth.DELETE("/files/:id", fileHandler.Delete)
 			auth.GET("/files/search", fileHandler.Search)
+
+			// MCP (Model Context Protocol) Streamable HTTP SSE endpoints
+			auth.GET("/mcp", MCPContextMiddleware(), mcpHandler.SSEConnect)
+			auth.POST("/mcp/message", MCPContextMiddleware(), mcpHandler.ReceiveMessage)
 		}
 	}
 

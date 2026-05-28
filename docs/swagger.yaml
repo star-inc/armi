@@ -58,6 +58,8 @@ definitions:
         type: number
       size:
         type: integer
+      source_query:
+        type: string
       updated_at:
         type: string
     type: object
@@ -285,7 +287,7 @@ paths:
   /files/search:
     get:
       description: Generates an embedding query and performs vector search for similar
-        documents, returning metadata and similarity scores.
+        documents, returning metadata, similarity scores and source queries.
       parameters:
       - description: Search query text
         in: query
@@ -295,6 +297,14 @@ paths:
       - description: Max search results limit (default 5)
         in: query
         name: limit
+        type: integer
+      - description: Enable NLP semantic search query expansion
+        in: query
+        name: nlp_expansion
+        type: boolean
+      - description: Number of alternative queries to generate (default 3)
+        in: query
+        name: expansion_num
         type: integer
       produces:
       - application/json
@@ -328,6 +338,51 @@ paths:
       summary: Search files semantically
       tags:
       - files
+  /mcp:
+    get:
+      description: Establishes a Streamable HTTP (SSE) connection channel.
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE Connection established
+          schema:
+            type: string
+      security:
+      - BasicAuth: []
+      summary: Connect to MCP Server (SSE)
+      tags:
+      - mcp
+  /mcp/message:
+    post:
+      consumes:
+      - application/json
+      description: Sends JSON-RPC 2.0 request messages (like initialize, tools/list,
+        tools/call).
+      parameters:
+      - description: Session ID (SSE Client)
+        in: query
+        name: sessionId
+        required: true
+        type: string
+      - description: JSON-RPC Request
+        in: body
+        name: request
+        required: true
+        schema:
+          type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Message accepted
+          schema:
+            type: string
+      security:
+      - BasicAuth: []
+      summary: Post message to MCP Server
+      tags:
+      - mcp
   /users/register:
     post:
       consumes:

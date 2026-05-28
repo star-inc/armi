@@ -64,4 +64,11 @@ func InitConfig() {
 	viper.SetDefault("rabbitmq.url", "amqp://guest:guest@localhost:5672/")
 	viper.SetDefault("rabbitmq.exchange", "armi.events")
 	viper.SetDefault("rabbitmq.routing_key", "user.events")
+
+	// NLP Search and LLM Defaults
+	viper.SetDefault("search.nlp_expansion.enabled", true)
+	viper.SetDefault("search.nlp_expansion.max_limit", 10)
+	viper.SetDefault("llm.model", "gpt-4o-mini")
+	viper.SetDefault("llm.openai.api_key", "")
+	viper.SetDefault("llm.openai.base_url", "https://api.openai.com/v1")
 }

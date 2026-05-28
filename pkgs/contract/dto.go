@@ -30,6 +30,7 @@ type FileResponse struct {
 // SearchResponseItem represents a vector search matched item.
 type SearchResponseItem struct {
 	FileResponse
-	Distance float32 `json:"distance"`
-	Score    float32 `json:"score"`
+	Distance    float32 `json:"distance"`
+	Score       float32 `json:"score"`
+	SourceQuery string  `json:"source_query"`
 }

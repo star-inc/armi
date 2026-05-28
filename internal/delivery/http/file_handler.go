@@ -269,11 +269,13 @@ func (h *FileHandler) Delete(c *gin.Context) {
 
 // Search performs a semantic search over files.
 // @Summary      Search files semantically
-// @Description  Generates an embedding query and performs vector search for similar documents, returning metadata and similarity scores.
+// @Description  Generates an embedding query and performs vector search for similar documents, returning metadata, similarity scores and source queries.
 // @Tags         files
 // @Produce      json
-// @Param        q      query     string  true   "Search query text"
-// @Param        limit  query     int     false  "Max search results limit (default 5)"
+// @Param        q              query     string  true   "Search query text"
+// @Param        limit          query     int     false  "Max search results limit (default 5)"
+// @Param        nlp_expansion  query     bool    false  "Enable NLP semantic search query expansion"
+// @Param        expansion_num  query     int     false  "Number of alternative queries to generate (default 3)"
 // @Success      200    {array}   contract.SearchResponseItem
 // @Failure      400    {object}  map[string]string "Missing query parameter 'q'"
 // @Failure      401    {object}  map[string]string "Unauthorized"
@@ -301,7 +303,21 @@ func (h *FileHandler) Search(c *gin.Context) {
 		}
 	}
 
-	items, err := h.fileUsecase.Search(c.Request.Context(), dbUser.ID, query, limit)
+	nlpExpansion := false
+	if nlpStr := c.Query("nlp_expansion"); nlpStr != "" {
+		if parsed, err := strconv.ParseBool(nlpStr); err == nil {
+			nlpExpansion = parsed
+		}
+	}
+
+	expansionNum := 3
+	if expNumStr := c.Query("expansion_num"); expNumStr != "" {
+		if parsedExpNum, err := strconv.Atoi(expNumStr); err == nil && parsedExpNum > 0 {
+			expansionNum = parsedExpNum
+		}
+	}
+
+	items, err := h.fileUsecase.Search(c.Request.Context(), dbUser.ID, query, limit, nlpExpansion, expansionNum)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "search failed"})
 		return

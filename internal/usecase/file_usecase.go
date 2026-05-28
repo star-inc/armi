@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"sort"
 
 	"github.com/rs/xid"
+	"github.com/spf13/viper"
 	"github.com/supersonictw/armi/internal/extractor"
 	"github.com/supersonictw/armi/pkgs/contract"
 	"github.com/supersonictw/armi/pkgs/file"
@@ -18,6 +20,7 @@ type FileUsecase struct {
 	storage   file.Storage
 	embedder  file.Embedder
 	vectorDB  file.VectorDB
+	llm       file.LLM
 	publisher file.EventPublisher
 }
 
@@ -26,6 +29,7 @@ func NewFileUsecase(
 	storage file.Storage,
 	embedder file.Embedder,
 	vectorDB file.VectorDB,
+	llm file.LLM,
 	publisher file.EventPublisher,
 ) *FileUsecase {
 	return &FileUsecase{
@@ -33,6 +37,7 @@ func NewFileUsecase(
 		storage:   storage,
 		embedder:  embedder,
 		vectorDB:  vectorDB,
+		llm:       llm,
 		publisher: publisher,
 	}
 }
@@ -324,61 +329,116 @@ func (uc *FileUsecase) Delete(ctx context.Context, userID string, fileID string)
 	return physicalDeleted, nil
 }
 
-func (uc *FileUsecase) Search(ctx context.Context, userID string, query string, limit int) ([]contract.SearchResponseItem, error) {
+func (uc *FileUsecase) Search(
+	ctx context.Context,
+	userID string,
+	query string,
+	limit int,
+	nlpExpansion bool,
+	expansionNum int,
+) ([]contract.SearchResponseItem, error) {
 	if query == "" {
 		return nil, errors.New("query text is required")
 	}
 
-	// Generate embedding for query text
-	queryEmbedding, err := uc.embedder.Embed(ctx, query)
-	if err != nil {
-		slog.Error("failed to generate search query embedding", "error", err)
-		return nil, err
-	}
+	var targetQueries []string
+	targetQueries = append(targetQueries, query)
 
-	// Perform vector search
-	searchResults, err := uc.vectorDB.Search(ctx, queryEmbedding, limit)
-	if err != nil {
-		slog.Error("vector database search failed", "error", err)
-		return nil, err
-	}
+	nlpEnabledGlobal := viper.GetBool("search.nlp_expansion.enabled")
+	if nlpExpansion && nlpEnabledGlobal && uc.llm != nil {
+		maxLimit := viper.GetInt("search.nlp_expansion.max_limit")
+		if maxLimit <= 0 {
+			maxLimit = 10
+		}
+		if expansionNum > maxLimit {
+			expansionNum = maxLimit
+		}
 
-	// Filter by ownership and map results
-	var fileIDs []string
-	distanceMap := make(map[string]float32)
-	for _, res := range searchResults {
-		fileIDs = append(fileIDs, res.FileID)
-		distanceMap[res.FileID] = res.Distance
-	}
-
-	if len(fileIDs) == 0 {
-		return []contract.SearchResponseItem{}, nil
-	}
-
-	// Fetch records owned by user
-	var records []*file.FileRecord
-	for _, id := range fileIDs {
-		r, err := uc.fileRepo.GetByID(ctx, id)
-		if err == nil && r != nil && r.OwnerID == userID {
-			records = append(records, r)
+		expanded, err := uc.llm.GenerateQueries(ctx, query, expansionNum)
+		if err != nil {
+			slog.Warn("failed to generate NLP expanded queries, falling back to original query only", "error", err)
+		} else {
+			targetQueries = append(targetQueries, expanded...)
 		}
 	}
 
-	// Sort and format response items to match vector search order
-	recordMap := make(map[string]*file.FileRecord)
-	for _, r := range records {
-		recordMap[r.ID] = r
+	type candidate struct {
+		record      *file.FileRecord
+		distance    float32
+		score       float32
+		sourceQuery string
 	}
 
+	mergedCandidates := make(map[string]candidate)
+
+	for _, q := range targetQueries {
+		// Generate embedding for query text
+		queryEmbedding, err := uc.embedder.Embed(ctx, q)
+		if err != nil {
+			slog.Error("failed to generate search query embedding", "query", q, "error", err)
+			continue
+		}
+
+		// Perform vector search
+		searchResults, err := uc.vectorDB.Search(ctx, queryEmbedding, limit)
+		if err != nil {
+			slog.Error("vector database search failed", "query", q, "error", err)
+			continue
+		}
+
+		// Filter by ownership and populate merge candidates
+		for _, res := range searchResults {
+			r, err := uc.fileRepo.GetByID(ctx, res.FileID)
+			if err != nil || r == nil || r.OwnerID != userID {
+				continue
+			}
+
+			score := 1.0 - res.Distance
+			existing, exists := mergedCandidates[res.FileID]
+			if !exists || score > existing.score {
+				mergedCandidates[res.FileID] = candidate{
+					record:      r,
+					distance:    res.Distance,
+					score:       score,
+					sourceQuery: q,
+				}
+			}
+		}
+	}
+
+	var candidatesList []candidate
+	for _, c := range mergedCandidates {
+		candidatesList = append(candidatesList, c)
+	}
+
+	// Sort candidates by score descending
+	sort.Slice(candidatesList, func(i, j int) bool {
+		return candidatesList[i].score > candidatesList[j].score
+	})
+
+	// Slice to requested limit
+	if len(candidatesList) > limit {
+		candidatesList = candidatesList[:limit]
+	}
+
+	// Sort and format response items
 	var responseItems []contract.SearchResponseItem
-	for _, fileID := range fileIDs {
-		if r, ok := recordMap[fileID]; ok {
-			responseItems = append(responseItems, contract.SearchResponseItem{
-				FileResponse: toFileResponse(r),
-				Distance:     distanceMap[fileID],
-				Score:        1.0 - distanceMap[fileID],
-			})
-		}
+	for _, c := range candidatesList {
+		responseItems = append(responseItems, contract.SearchResponseItem{
+			FileResponse: contract.FileResponse{
+				ID:          c.record.ID,
+				Filename:    c.record.Filename,
+				Hash:        c.record.Hash,
+				Size:        c.record.Size,
+				ContentType: c.record.ContentType,
+				OwnerID:     c.record.OwnerID,
+				CreatedAt:   c.record.CreatedAt,
+				UpdatedAt:   c.record.UpdatedAt,
+			},
+			Distance:    c.distance,
+			Score:       c.score,
+			SourceQuery: c.sourceQuery,
+		})
 	}
 
 	return responseItems, nil

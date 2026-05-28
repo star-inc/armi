@@ -9,6 +9,7 @@ import (
 	httpDelivery "github.com/supersonictw/armi/internal/delivery/http"
 	"github.com/supersonictw/armi/internal/infrastructure/database"
 	"github.com/supersonictw/armi/internal/infrastructure/embedding"
+	"github.com/supersonictw/armi/internal/infrastructure/llm"
 	"github.com/supersonictw/armi/internal/infrastructure/rabbitmq"
 	"github.com/supersonictw/armi/internal/infrastructure/storage"
 	"github.com/supersonictw/armi/internal/infrastructure/vector"
@@ -63,6 +64,12 @@ func main() {
 		}
 	}()
 
+	// 5.5 Initialize LLM Service (OpenAI)
+	llmService, err := llm.NewOpenAILLM()
+	if err != nil {
+		log.Fatalf("failed to initialize LLM: %v", err)
+	}
+
 	// 6. Initialize RabbitMQ Event Publisher
 	publisher, err := rabbitmq.NewRabbitMQPublisher()
 	if err != nil {
@@ -83,7 +90,7 @@ func main() {
 
 	// 8. Instantiate Use Cases (Business Logic Layers)
 	userUsecase := usecase.NewUserUsecase(userRepo, publisher)
-	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, publisher)
+	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher)
 
 	// 9. Instantiate and Run HTTP server (Delivery Layer)
 	server := httpDelivery.NewServer(userUsecase, fileUsecase, publisher)
