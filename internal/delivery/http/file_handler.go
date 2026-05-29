@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -69,33 +70,10 @@ func (h *FileHandler) Upload(c *gin.Context) {
 	})
 
 	var content bytes.Buffer
-	buf := make([]byte, 512*1024)
-	var bytesUploaded int64
-	totalBytes := fileHeader.Size
-
-	for {
-		n, err := multipartFile.Read(buf)
-		if n > 0 {
-			content.Write(buf[:n])
-			bytesUploaded += int64(n)
-			percentage := float64(bytesUploaded) / float64(totalBytes) * 100.0
-
-			h.publisher.PublishEvent(c.Request.Context(), "file.upload_progress", dbUser.ID, map[string]interface{}{
-				"transfer_id":    transferID,
-				"filename":       filename,
-				"bytes_uploaded": bytesUploaded,
-				"total_bytes":    totalBytes,
-				"percentage":     percentage,
-			})
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			slog.Error("failed to read upload stream", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read upload file"})
-			return
-		}
+	if _, err := io.Copy(&content, multipartFile); err != nil {
+		slog.Error("failed to read upload stream", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read upload file"})
+		return
 	}
 
 	tags := c.PostFormArray("tags")
@@ -130,7 +108,7 @@ func (h *FileHandler) Upload(c *gin.Context) {
 		tags,
 	)
 	if err != nil {
-		if err.Error() == "file conflict: identical file or filename already exists" {
+		if errors.Is(err, file.ErrFileConflict) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
@@ -193,11 +171,11 @@ func (h *FileHandler) Download(c *gin.Context) {
 
 	data, filename, contentType, size, err := h.fileUsecase.Download(c.Request.Context(), dbUser.ID, fileID)
 	if err != nil {
-		if err.Error() == "file not found" {
+		if errors.Is(err, file.ErrFileNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
-		if err.Error() == "access denied" {
+		if errors.Is(err, file.ErrAccessDenied) {
 			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 			return
 		}
@@ -235,11 +213,11 @@ func (h *FileHandler) GetMetadata(c *gin.Context) {
 
 	record, opMetadata, err := h.fileUsecase.GetMetadata(c.Request.Context(), dbUser.ID, fileID)
 	if err != nil {
-		if err.Error() == "file not found" {
+		if errors.Is(err, file.ErrFileNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
-		if err.Error() == "access denied" {
+		if errors.Is(err, file.ErrAccessDenied) {
 			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 			return
 		}
@@ -277,11 +255,11 @@ func (h *FileHandler) Delete(c *gin.Context) {
 
 	physicalDeleted, err := h.fileUsecase.Delete(c.Request.Context(), dbUser.ID, fileID)
 	if err != nil {
-		if err.Error() == "file not found" {
+		if errors.Is(err, file.ErrFileNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
-		if err.Error() == "access denied" {
+		if errors.Is(err, file.ErrAccessDenied) {
 			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 			return
 		}

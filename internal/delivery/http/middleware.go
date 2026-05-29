@@ -200,10 +200,10 @@ func FileValidationMiddleware(publisher file.EventPublisher) gin.HandlerFunc {
 			publisher.PublishEvent(c.Request.Context(), "file.validation_failed", "", map[string]interface{}{
 				"filename":     fileHeader.Filename,
 				"content_type": fileHeader.Header.Get("Content-Type"),
-				"reason":       "unsupported file format, allowed: PDF, Word, PPT, Excel, TXT, RTF",
+				"reason":       "unsupported file format, allowed: PDF, Word, PPT, Excel, TXT, RTF, Markdown",
 			})
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
-				"error": "unsupported file format. allowed: .pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .txt, .rtf",
+				"error": "unsupported file format. allowed: .pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .txt, .rtf, .md",
 			})
 			return
 		}

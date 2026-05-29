@@ -105,7 +105,7 @@ func (uc *FileUsecase) Upload(
 			"hash":     sha3Hash,
 			"reason":   "file with same name or content already exists for this user",
 		})
-		return nil, errors.New("file conflict: identical file or filename already exists")
+		return nil, file.ErrFileConflict
 	}
 
 	// Check global reference count for physical file deduplication
@@ -169,6 +169,10 @@ func (uc *FileUsecase) Upload(
 			// Roll back: delete the DB record so the upload appears as if it never happened.
 			if delErr := uc.fileRepo.Delete(ctx, fileID); delErr != nil {
 				slog.Error("failed to roll back file record after embedding error", "file_id", fileID, "error", delErr)
+			}
+			// Roll back vectors from vector database
+			if vecDelErr := uc.vectorDB.Delete(ctx, fileID); vecDelErr != nil {
+				slog.Error("failed to roll back vectors after embedding error", "file_id", fileID, "error", vecDelErr)
 			}
 			// Roll back physical file if it was newly created
 			if globalCount == 0 {
@@ -349,12 +353,12 @@ func (uc *FileUsecase) Download(ctx context.Context, userID string, fileID strin
 		return nil, "", "", 0, err
 	}
 	if record == nil {
-		return nil, "", "", 0, errors.New("file not found")
+		return nil, "", "", 0, file.ErrFileNotFound
 	}
 
 	// Verify ownership
 	if record.OwnerID != userID {
-		return nil, "", "", 0, errors.New("access denied")
+		return nil, "", "", 0, file.ErrAccessDenied
 	}
 
 	key := "sha3-256-" + record.Hash
@@ -384,12 +388,12 @@ func (uc *FileUsecase) GetMetadata(ctx context.Context, userID string, fileID st
 		return nil, nil, err
 	}
 	if record == nil {
-		return nil, nil, errors.New("file not found")
+		return nil, nil, file.ErrFileNotFound
 	}
 
 	// Verify ownership
 	if record.OwnerID != userID {
-		return nil, nil, errors.New("access denied")
+		return nil, nil, file.ErrAccessDenied
 	}
 
 	key := "sha3-256-" + record.Hash
@@ -418,12 +422,12 @@ func (uc *FileUsecase) Delete(ctx context.Context, userID string, fileID string)
 		return false, err
 	}
 	if record == nil {
-		return false, errors.New("file not found")
+		return false, file.ErrFileNotFound
 	}
 
 	// Verify ownership
 	if record.OwnerID != userID {
-		return false, errors.New("access denied")
+		return false, file.ErrAccessDenied
 	}
 
 	// Delete DB Record
@@ -559,25 +563,30 @@ func (uc *FileUsecase) Search(
 				return
 			}
 
-			mu.Lock()
-			defer mu.Unlock()
 			// Filter by ownership and populate merge candidates
 			for _, res := range searchResults {
+				mu.Lock()
 				r, exists := fileCache[res.FileID]
+				mu.Unlock()
+
 				if !exists {
 					var err error
 					r, err = uc.fileRepo.GetByID(ctx, res.FileID)
+					mu.Lock()
 					if err != nil {
 						fileCache[res.FileID] = nil
+						mu.Unlock()
 						continue
 					}
 					fileCache[res.FileID] = r
+					mu.Unlock()
 				}
 				if r == nil || r.OwnerID != userID {
 					continue
 				}
 
 				score := 1.0 - res.Distance
+				mu.Lock()
 				existing, exists := mergedCandidates[res.ChunkID]
 				if !exists || score > existing.score {
 					mergedCandidates[res.ChunkID] = candidate{
@@ -589,6 +598,7 @@ func (uc *FileUsecase) Search(
 						sourceQuery: q,
 					}
 				}
+				mu.Unlock()
 			}
 		}(q)
 	}
