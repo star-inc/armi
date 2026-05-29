@@ -71,6 +71,12 @@ func PerformOCRForPDF(ctx context.Context, pdfContent []byte, llm file.LLM) (str
 	// Sort image files numerically to process pages in order
 	sortPageFiles(imageFiles)
 
+	// Limit to first 20 pages to prevent API call explosion and high latency
+	if len(imageFiles) > 20 {
+		slog.Info("reached maximum page limit for PDF OCR, skipping remaining pages", "total", len(imageFiles))
+		imageFiles = imageFiles[:20]
+	}
+
 	var extractedTexts []string
 	for idx, imgPath := range imageFiles {
 		imgBytes, err := os.ReadFile(imgPath)

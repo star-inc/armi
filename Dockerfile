@@ -5,6 +5,7 @@ RUN apk add --no-cache make
 RUN make && make clean-deps
 
 FROM alpine:latest
+RUN apk add --no-cache ghostscript
 ENV GIN_MODE release
 COPY --from=builder /workplace/build/armi /workplace/armi
 WORKDIR /workplace

@@ -92,7 +92,7 @@ func NewRabbitMQPublisher() (file.EventPublisher, error) {
 // Embedding progress events (prefix "embedding.") are additionally fanned out
 // on the broadcast exchange so any subscriber can receive them.
 func (p *RabbitMQPublisher) PublishEvent(ctx context.Context, eventType string, userID string, payload map[string]interface{}) {
-	if !p.enabled {
+	if p == nil || !p.enabled {
 		return
 	}
 
@@ -147,7 +147,7 @@ func (p *RabbitMQPublisher) PublishEvent(ctx context.Context, eventType string, 
 
 // IsAvailable reports whether RabbitMQ is connected and usable.
 func (p *RabbitMQPublisher) IsAvailable() bool {
-	if !p.enabled {
+	if p == nil || !p.enabled {
 		return false
 	}
 	p.mu.RLock()
@@ -157,7 +157,7 @@ func (p *RabbitMQPublisher) IsAvailable() bool {
 
 // Close gracefully closes RabbitMQ connection and channel resources.
 func (p *RabbitMQPublisher) Close() error {
-	if !p.enabled {
+	if p == nil || !p.enabled {
 		return nil
 	}
 	p.mu.Lock()
@@ -237,7 +237,7 @@ func NewRabbitMQJobPublisher() (file.EmbeddingJobPublisher, error) {
 
 // PublishEmbeddingJob enqueues an EmbeddingJob to the work queue.
 func (p *RabbitMQJobPublisher) PublishEmbeddingJob(ctx context.Context, job contract.EmbeddingJob) error {
-	if !p.enabled {
+	if p == nil || !p.enabled {
 		return nil
 	}
 
@@ -280,7 +280,7 @@ func (p *RabbitMQJobPublisher) PublishEmbeddingJob(ctx context.Context, job cont
 
 // IsAvailable reports whether the job publisher can accept new jobs.
 func (p *RabbitMQJobPublisher) IsAvailable() bool {
-	if !p.enabled {
+	if p == nil || !p.enabled {
 		return false
 	}
 	p.mu.RLock()
@@ -290,7 +290,7 @@ func (p *RabbitMQJobPublisher) IsAvailable() bool {
 
 // Close gracefully closes the job publisher's connection.
 func (p *RabbitMQJobPublisher) Close() error {
-	if !p.enabled {
+	if p == nil || !p.enabled {
 		return nil
 	}
 	p.mu.Lock()

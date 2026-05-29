@@ -249,31 +249,9 @@ func (uc *FileUsecase) embedSync(
 	}
 
 	if !vectorCopied {
-		text, extractErr := extractor.ExtractText(content, filename)
+		text, extractErr := uc.extractTextFromContent(ctx, content, filename)
 		if extractErr != nil {
-			return fmt.Errorf("text extraction failed: %w", extractErr)
-		}
-		if text == "" && uc.llm != nil {
-			lowerFilename := strings.ToLower(filename)
-			if strings.HasSuffix(lowerFilename, ".pdf") {
-				slog.Info("Extracted text is empty, trying OCR on PDF pages", "filename", filename)
-				ocrText, ocrErr := extractor.PerformOCRForPDF(ctx, content, uc.llm)
-				if ocrErr == nil && ocrText != "" {
-					text = ocrText
-					slog.Info("Successfully extracted text via PDF OCR", "filename", filename, "text_len", len(text))
-				} else if ocrErr != nil {
-					slog.Warn("PDF OCR fallback failed", "filename", filename, "error", ocrErr)
-				}
-			} else if strings.HasSuffix(lowerFilename, ".pptx") || strings.HasSuffix(lowerFilename, ".ppt") {
-				slog.Info("Extracted text is empty, trying OCR on PPTX embedded images", "filename", filename)
-				ocrText, ocrErr := extractor.PerformOCRForPPTX(ctx, content, uc.llm)
-				if ocrErr == nil && ocrText != "" {
-					text = ocrText
-					slog.Info("Successfully extracted text via PPTX OCR", "filename", filename, "text_len", len(text))
-				} else if ocrErr != nil {
-					slog.Warn("PPTX OCR fallback failed", "filename", filename, "error", ocrErr)
-				}
-			}
+			return extractErr
 		}
 		if text == "" {
 			// No extractable text — not a fatal error, skip silently.
@@ -302,6 +280,46 @@ func (uc *FileUsecase) embedSync(
 		}
 	}
 	return nil
+}
+
+// extractTextFromContent processes raw bytes of a file to extract text, falling back to OCR if needed.
+func (uc *FileUsecase) extractTextFromContent(ctx context.Context, content []byte, filename string) (string, error) {
+	text, extractErr := extractor.ExtractText(content, filename)
+	if extractErr != nil {
+		return "", fmt.Errorf("text extraction failed: %w", extractErr)
+	}
+	if text == "" && uc.llm != nil {
+		lowerFilename := strings.ToLower(filename)
+		if strings.HasSuffix(lowerFilename, ".pdf") {
+			slog.Info("Extracted text is empty, trying OCR on PDF pages", "filename", filename)
+			ocrText, ocrErr := extractor.PerformOCRForPDF(ctx, content, uc.llm)
+			if ocrErr == nil && ocrText != "" {
+				text = ocrText
+				slog.Info("Successfully extracted text via PDF OCR", "filename", filename, "text_len", len(text))
+			} else if ocrErr != nil {
+				slog.Warn("PDF OCR fallback failed", "filename", filename, "error", ocrErr)
+			}
+		} else if strings.HasSuffix(lowerFilename, ".pptx") || strings.HasSuffix(lowerFilename, ".ppt") {
+			slog.Info("Extracted text is empty, trying OCR on PPTX embedded images", "filename", filename)
+			ocrText, ocrErr := extractor.PerformOCRForPPTX(ctx, content, uc.llm)
+			if ocrErr == nil && ocrText != "" {
+				text = ocrText
+				slog.Info("Successfully extracted text via PPTX OCR", "filename", filename, "text_len", len(text))
+			} else if ocrErr != nil {
+				slog.Warn("PPTX OCR fallback failed", "filename", filename, "error", ocrErr)
+			}
+		}
+	}
+	return text, nil
+}
+
+// ExtractText fetches file content (verifying ownership) and extracts text using OCR fallback when necessary.
+func (uc *FileUsecase) ExtractText(ctx context.Context, userID string, fileID string) (string, error) {
+	data, filename, _, _, err := uc.Download(ctx, userID, fileID)
+	if err != nil {
+		return "", err
+	}
+	return uc.extractTextFromContent(ctx, data, filename)
 }
 
 func (uc *FileUsecase) List(ctx context.Context, userID string, tag string) ([]contract.FileResponse, error) {

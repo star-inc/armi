@@ -329,10 +329,17 @@ func TestMCPFlow(t *testing.T) {
 		server.Engine.ServeHTTP(sseRec, sseReq)
 	}()
 
-	// Wait briefly for SSE server to write endpoint event
-	time.Sleep(100 * time.Millisecond)
+	// Wait for SSE server to write endpoint event
+	var bodyStr string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		bodyStr = sseRec.Body.String()
+		if strings.Contains(bodyStr, "event: endpoint") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
-	bodyStr := sseRec.Body.String()
 	if !strings.Contains(bodyStr, "event: endpoint") {
 		cancel()
 		t.Fatalf("Expected endpoint event in SSE stream, got: %s", bodyStr)
@@ -367,10 +374,17 @@ func TestMCPFlow(t *testing.T) {
 		t.Fatalf("Expected message post accepted, got status %d: %s", wMsg.Code, wMsg.Body.String())
 	}
 
-	// Wait briefly for server response via SSE channel
-	time.Sleep(100 * time.Millisecond)
+	// Wait for server response via SSE channel
+	var finalBody string
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		finalBody = sseRec.Body.String()
+		if strings.Contains(finalBody, "list_files") || strings.Contains(finalBody, "search_files") || strings.Contains(finalBody, "read_file") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
-	finalBody := sseRec.Body.String()
 	if !strings.Contains(finalBody, "list_files") || !strings.Contains(finalBody, "search_files") || !strings.Contains(finalBody, "read_file") {
 		cancel()
 		t.Fatalf("Expected tools in SSE body, got: %s", finalBody)

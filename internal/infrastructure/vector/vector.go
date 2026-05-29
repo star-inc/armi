@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"net/http"
@@ -74,6 +75,13 @@ func toUUID(fileID string) string {
 
 // === SQLiteVectorDB ===
 
+func hashToRowID(s string) int64 {
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	// Mask the sign bit to guarantee a positive signed 64-bit integer
+	return int64(h.Sum64() & 0x7fffffffffffffff)
+}
+
 // Insert saves embedding vector into sqlite-vec.
 func (s *SQLiteVectorDB) Insert(ctx context.Context, fileID string, chunkIndex int, text string, embedding []float32) error {
 	if database.DB == nil {
@@ -87,13 +95,14 @@ func (s *SQLiteVectorDB) Insert(ctx context.Context, fileID string, chunkIndex i
 	}
 
 	chunkID := fmt.Sprintf("%s_%d", fileID, chunkIndex)
+	rowID := hashToRowID(chunkID)
 	err := database.DB.WithContext(ctx).Exec(
-		"INSERT OR REPLACE INTO file_embeddings(chunk_id, file_id, text, embedding) VALUES (?, ?, ?, ?)",
-		chunkID, fileID, text, serialized,
+		"INSERT OR REPLACE INTO file_embeddings(rowid, chunk_id, file_id, text, embedding) VALUES (?, ?, ?, ?, ?)",
+		rowID, chunkID, fileID, text, serialized,
 	).Error
 
 	if err != nil {
-		slog.Error("sqlite-vec insert failed", "chunk_id", chunkID, "file_id", fileID, "error", err)
+		slog.Error("sqlite-vec insert failed", "chunk_id", chunkID, "file_id", fileID, "rowid", rowID, "error", err)
 		return fmt.Errorf("failed to insert vector into sqlite-vec: %w", err)
 	}
 
@@ -106,14 +115,38 @@ func (s *SQLiteVectorDB) Copy(ctx context.Context, srcFileID string, destFileID 
 		return fmt.Errorf("rdbms database not initialized")
 	}
 
-	err := database.DB.WithContext(ctx).Exec(
-		"INSERT INTO file_embeddings(chunk_id, file_id, text, embedding) SELECT replace(chunk_id, ?, ?), ?, text, embedding FROM file_embeddings WHERE file_id = ?",
-		srcFileID, destFileID, destFileID, srcFileID,
-	).Error
-
+	// Query all chunks for srcFileID
+	rows, err := database.DB.WithContext(ctx).Raw(
+		"SELECT chunk_id, text, embedding FROM file_embeddings WHERE file_id = ?",
+		srcFileID,
+	).Rows()
 	if err != nil {
-		slog.Error("sqlite-vec copy failed", "src_id", srcFileID, "dest_id", destFileID, "error", err)
-		return fmt.Errorf("failed to copy vector in sqlite-vec: %w", err)
+		slog.Error("sqlite-vec copy failed (select)", "src_id", srcFileID, "error", err)
+		return fmt.Errorf("failed to query source vectors: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	// Iterate and insert each duplicated chunk with a deterministic rowid
+	for rows.Next() {
+		var oldChunkID, text string
+		var embedding []byte
+
+		if err := rows.Scan(&oldChunkID, &text, &embedding); err != nil {
+			slog.Error("sqlite-vec copy scan failed", "src_id", srcFileID, "error", err)
+			return fmt.Errorf("failed to scan source vector row: %w", err)
+		}
+
+		newChunkID := strings.Replace(oldChunkID, srcFileID, destFileID, 1)
+		rowID := hashToRowID(newChunkID)
+
+		err := database.DB.WithContext(ctx).Exec(
+			"INSERT OR REPLACE INTO file_embeddings(rowid, chunk_id, file_id, text, embedding) VALUES (?, ?, ?, ?, ?)",
+			rowID, newChunkID, destFileID, text, embedding,
+		).Error
+		if err != nil {
+			slog.Error("sqlite-vec copy insert failed", "dest_id", destFileID, "chunk_id", newChunkID, "error", err)
+			return fmt.Errorf("failed to insert copy vector: %w", err)
+		}
 	}
 
 	return nil

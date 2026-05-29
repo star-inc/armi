@@ -26,7 +26,7 @@ func NewServer(
 	authScheme jwtauth.AuthScheme,
 	jwtVerifier *jwtauth.Verifier, // nil when JWT is disabled (Basic-only mode)
 ) *Server {
-	gin.SetMode(gin.ReleaseMode)
+	// gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))

@@ -173,7 +173,10 @@ func (o *OpenAIEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 
 	if resp.StatusCode != http.StatusOK {
 		respBytes, _ := io.ReadAll(resp.Body)
-		maskedBody := strings.ReplaceAll(string(respBytes), o.APIKey, "***")
+		maskedBody := string(respBytes)
+		if o.APIKey != "" {
+			maskedBody = strings.ReplaceAll(maskedBody, o.APIKey, "***")
+		}
 		slog.Error("OpenAI embed API returned non-OK status", "status", resp.Status, "response", maskedBody)
 		return nil, fmt.Errorf("api error status: %s", resp.Status)
 	}

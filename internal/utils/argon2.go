@@ -37,6 +37,9 @@ func VerifyArgon2id(password, encodedHash string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if parallelism < 1 || parallelism > 255 {
+		return false, errors.New("invalid argon2 parallelism parameter")
+	}
 
 	salt, err := base64.RawStdEncoding.Strict().DecodeString(vals[4])
 	if err != nil {

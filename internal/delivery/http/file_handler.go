@@ -5,6 +5,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -58,10 +60,11 @@ func (h *FileHandler) Upload(c *gin.Context) {
 	}
 	defer func() { _ = multipartFile.Close() }()
 
+	filename := filepath.Base(fileHeader.Filename)
 	transferID := xid.New().String()
 	h.publisher.PublishEvent(c.Request.Context(), "file.upload_started", dbUser.ID, map[string]interface{}{
 		"transfer_id": transferID,
-		"filename":    fileHeader.Filename,
+		"filename":    filename,
 		"size":        fileHeader.Size,
 	})
 
@@ -79,7 +82,7 @@ func (h *FileHandler) Upload(c *gin.Context) {
 
 			h.publisher.PublishEvent(c.Request.Context(), "file.upload_progress", dbUser.ID, map[string]interface{}{
 				"transfer_id":    transferID,
-				"filename":       fileHeader.Filename,
+				"filename":       filename,
 				"bytes_uploaded": bytesUploaded,
 				"total_bytes":    totalBytes,
 				"percentage":     percentage,
@@ -120,7 +123,7 @@ func (h *FileHandler) Upload(c *gin.Context) {
 	resp, err := h.fileUsecase.Upload(
 		c.Request.Context(),
 		dbUser.ID,
-		fileHeader.Filename,
+		filename,
 		fileHeader.Header.Get("Content-Type"),
 		content.Bytes(),
 		transferID,
@@ -202,7 +205,7 @@ func (h *FileHandler) Download(c *gin.Context) {
 		return
 	}
 
-	c.Header("Content-Disposition", "attachment; filename="+filename)
+	c.Header("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(filename))
 	c.Header("Content-Type", contentType)
 	c.Header("Content-Length", strconv.FormatInt(size, 10))
 	c.Data(http.StatusOK, contentType, data)

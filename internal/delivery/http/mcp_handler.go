@@ -9,7 +9,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/supersonictw/armi/internal/extractor"
 	"github.com/supersonictw/armi/internal/usecase"
 	"github.com/supersonictw/armi/pkgs/user"
 )
@@ -197,16 +196,10 @@ func (h *MCPHandler) handleReadFile(ctx context.Context, request mcp.CallToolReq
 		return nil, fmt.Errorf("invalid file_id parameter type")
 	}
 
-	data, filename, _, _, err := h.fileUsecase.Download(ctx, dbUser.ID, fileID)
+	text, err := h.fileUsecase.ExtractText(ctx, dbUser.ID, fileID)
 	if err != nil {
-		slog.Error("MCP read_file tool failed to download file", "user_id", dbUser.ID, "file_id", fileID, "error", err)
-		return nil, fmt.Errorf("failed to read file contents: %w", err)
-	}
-
-	text, err := extractor.ExtractText(data, filename)
-	if err != nil {
-		slog.Error("MCP read_file tool failed to extract text", "file_id", fileID, "error", err)
-		return nil, fmt.Errorf("failed to extract text from document: %w", err)
+		slog.Error("MCP read_file tool failed to extract text", "user_id", dbUser.ID, "file_id", fileID, "error", err)
+		return nil, fmt.Errorf("failed to extract text: %w", err)
 	}
 
 	return &mcp.CallToolResult{
