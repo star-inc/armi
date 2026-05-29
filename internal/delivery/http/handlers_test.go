@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/supersonictw/armi/internal/infrastructure/database"
+	"github.com/supersonictw/armi/internal/infrastructure/jwtauth"
 	"github.com/supersonictw/armi/internal/infrastructure/storage"
 	"github.com/supersonictw/armi/internal/infrastructure/vector"
 	"github.com/supersonictw/armi/internal/usecase"
@@ -83,9 +84,9 @@ func setupTestEnv(t *testing.T) *Server {
 	fileRepo := database.NewGormFileRepository(db)
 
 	userUsecase := usecase.NewUserUsecase(userRepo, publisher)
-	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher)
+	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher, nil)
 
-	return NewServer(userUsecase, fileUsecase, publisher)
+	return NewServer(userUsecase, fileUsecase, publisher, jwtauth.AuthSchemeBasic, nil)
 }
 
 func TestHandlersFlow(t *testing.T) {
