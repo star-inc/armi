@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/rs/xid"
 	"github.com/supersonictw/armi/pkgs/file"
 	"gorm.io/gorm"
 )
@@ -23,6 +24,10 @@ func toDomainFile(g *gormFileRecord) *file.FileRecord {
 	if g == nil {
 		return nil
 	}
+	tags := make([]string, len(g.Tags))
+	for i, t := range g.Tags {
+		tags[i] = t.Name
+	}
 	return &file.FileRecord{
 		ID:          g.ID,
 		Filename:    g.Filename,
@@ -30,6 +35,7 @@ func toDomainFile(g *gormFileRecord) *file.FileRecord {
 		Size:        g.Size,
 		ContentType: g.ContentType,
 		OwnerID:     g.OwnerID,
+		Tags:        tags,
 		CreatedAt:   g.CreatedAt,
 		UpdatedAt:   g.UpdatedAt,
 	}
@@ -37,6 +43,19 @@ func toDomainFile(g *gormFileRecord) *file.FileRecord {
 
 // Create inserts a FileRecord entity into database.
 func (r *GormFileRepository) Create(ctx context.Context, f *file.FileRecord) error {
+	var gormTags []gormTag
+	for _, tagName := range f.Tags {
+		var gt gormTag
+		err := r.db.WithContext(ctx).Where("name = ?", tagName).FirstOrCreate(&gt, gormTag{
+			ID:   xid.New().String(),
+			Name: tagName,
+		}).Error
+		if err != nil {
+			return err
+		}
+		gormTags = append(gormTags, gt)
+	}
+
 	gf := &gormFileRecord{
 		ID:          f.ID,
 		Filename:    f.Filename,
@@ -44,6 +63,7 @@ func (r *GormFileRepository) Create(ctx context.Context, f *file.FileRecord) err
 		Size:        f.Size,
 		ContentType: f.ContentType,
 		OwnerID:     f.OwnerID,
+		Tags:        gormTags,
 	}
 	err := r.db.WithContext(ctx).Create(gf).Error
 	if err != nil {
@@ -57,7 +77,7 @@ func (r *GormFileRepository) Create(ctx context.Context, f *file.FileRecord) err
 // GetByID finds a FileRecord by ID. Returns nil, nil if not found.
 func (r *GormFileRepository) GetByID(ctx context.Context, id string) (*file.FileRecord, error) {
 	var gf gormFileRecord
-	err := r.db.WithContext(ctx).First(&gf, "id = ?", id).Error
+	err := r.db.WithContext(ctx).Preload("Tags").First(&gf, "id = ?", id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -70,7 +90,7 @@ func (r *GormFileRepository) GetByID(ctx context.Context, id string) (*file.File
 // GetByHash finds a FileRecord by Hash. Returns nil, nil if not found.
 func (r *GormFileRepository) GetByHash(ctx context.Context, hash string) (*file.FileRecord, error) {
 	var gf gormFileRecord
-	err := r.db.WithContext(ctx).First(&gf, "hash = ?", hash).Error
+	err := r.db.WithContext(ctx).Preload("Tags").First(&gf, "hash = ?", hash).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -80,10 +100,14 @@ func (r *GormFileRepository) GetByHash(ctx context.Context, hash string) (*file.
 	return toDomainFile(&gf), nil
 }
 
-// ListByOwnerID fetches all FileRecords owned by a user.
-func (r *GormFileRepository) ListByOwnerID(ctx context.Context, ownerID string) ([]*file.FileRecord, error) {
+// ListByOwnerID fetches all FileRecords owned by a user, optionally filtered by tag.
+func (r *GormFileRepository) ListByOwnerID(ctx context.Context, ownerID string, tag string) ([]*file.FileRecord, error) {
 	var gfs []gormFileRecord
-	err := r.db.WithContext(ctx).Where("owner_id = ?", ownerID).Find(&gfs).Error
+	query := r.db.WithContext(ctx).Preload("Tags").Where("owner_id = ?", ownerID)
+	if tag != "" {
+		query = query.Where("id IN (SELECT gorm_file_record_id FROM file_tags JOIN tags ON tags.id = file_tags.gorm_tag_id WHERE tags.name = ?)", tag)
+	}
+	err := query.Find(&gfs).Error
 	if err != nil {
 		return nil, err
 	}

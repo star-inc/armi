@@ -27,6 +27,18 @@ func (gormUser) TableName() string {
 	return "users"
 }
 
+// gormTag represents the database schema for tags.
+type gormTag struct {
+	ID        string    `gorm:"primaryKey;type:varchar(20)"`
+	Name      string    `gorm:"uniqueIndex;type:varchar(100)"`
+	CreatedAt time.Time `gorm:"autoCreateTime"`
+}
+
+// TableName overrides the table name for gormTag to "tags"
+func (gormTag) TableName() string {
+	return "tags"
+}
+
 // gormFileRecord represents the database schema for file records.
 type gormFileRecord struct {
 	ID          string    `gorm:"primaryKey;type:varchar(20)"`
@@ -35,6 +47,7 @@ type gormFileRecord struct {
 	Size        int64     `gorm:"type:bigint"`
 	ContentType string    `gorm:"type:varchar(255)"`
 	OwnerID     string    `gorm:"index;type:varchar(20)"`
+	Tags        []gormTag `gorm:"many2many:file_tags;"`
 	CreatedAt   time.Time `gorm:"autoCreateTime"`
 	UpdatedAt   time.Time `gorm:"autoUpdateTime"`
 }
@@ -74,7 +87,7 @@ func InitDB() (*gorm.DB, error) {
 	}
 
 	// Auto migrate the GORM schema models
-	err = db.AutoMigrate(&gormUser{}, &gormFileRecord{})
+	err = db.AutoMigrate(&gormUser{}, &gormFileRecord{}, &gormTag{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to auto migrate database: %w", err)
 	}

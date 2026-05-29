@@ -52,6 +52,10 @@ func (m *MockLLM) GenerateQueries(ctx context.Context, query string, num int) ([
 	return result, nil
 }
 
+func (m *MockLLM) PerformOCR(ctx context.Context, imageBase64 string) (string, error) {
+	return "mocked ocr text", nil
+}
+
 func setupTestEnv(t *testing.T) *Server {
 	t.Helper()
 
@@ -120,6 +124,7 @@ func TestHandlersFlow(t *testing.T) {
 	writer := multipart.NewWriter(body)
 	part, _ := writer.CreateFormFile("file", "document.txt")
 	_, _ = part.Write([]byte("This is a simple text document content talking about Go programming and vectors."))
+	_ = writer.WriteField("tags", "golang,test")
 	_ = writer.Close()
 
 	w = httptest.NewRecorder()
@@ -140,8 +145,32 @@ func TestHandlersFlow(t *testing.T) {
 	if fileRecord.Filename != "document.txt" {
 		t.Fatalf("Expected filename 'document.txt', got '%s'", fileRecord.Filename)
 	}
+	if len(fileRecord.Tags) != 2 || fileRecord.Tags[0] != "golang" || fileRecord.Tags[1] != "test" {
+		t.Fatalf("Expected tags ['golang', 'test'], got %v", fileRecord.Tags)
+	}
 
-	// 3. List Files (Requires BasicAuth)
+	// 2.2 Upload Second File (Requires BasicAuth)
+	body2 := &bytes.Buffer{}
+	writer2 := multipart.NewWriter(body2)
+	part2, _ := writer2.CreateFormFile("file", "python_doc.txt")
+	_, _ = part2.Write([]byte("Unrelated text about cookies and cakes."))
+	_ = writer2.WriteField("tags", "python")
+	_ = writer2.Close()
+
+	w2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest(http.MethodPost, "/api/v1/files", body2)
+	req2.Header.Set("Content-Type", writer2.FormDataContentType())
+	req2.SetBasicAuth("testuser", "securepassword")
+	server.Engine.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("Second file upload failed: %s", w2.Body.String())
+	}
+
+	var fileRecord2 contract.FileResponse
+	_ = json.Unmarshal(w2.Body.Bytes(), &fileRecord2)
+
+	// 3. List Files - No Filter (Requires BasicAuth)
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodGet, "/api/v1/files", nil)
 	req.SetBasicAuth("testuser", "securepassword")
@@ -153,11 +182,52 @@ func TestHandlersFlow(t *testing.T) {
 
 	var fileList []contract.FileResponse
 	_ = json.Unmarshal(w.Body.Bytes(), &fileList)
+	if len(fileList) != 2 {
+		t.Fatalf("Expected file list size 2, got %d", len(fileList))
+	}
+
+	// 3.1 List Files - Filter by tag 'golang'
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodGet, "/api/v1/files?tag=golang", nil)
+	req.SetBasicAuth("testuser", "securepassword")
+	server.Engine.ServeHTTP(w, req)
+
+	_ = json.Unmarshal(w.Body.Bytes(), &fileList)
 	if len(fileList) != 1 {
-		t.Fatalf("Expected file list size 1, got %d", len(fileList))
+		t.Fatalf("Expected 1 file with tag 'golang', got %d", len(fileList))
 	}
 	if fileList[0].ID != fileRecord.ID {
 		t.Fatalf("Expected list item ID '%s', got '%s'", fileRecord.ID, fileList[0].ID)
+	}
+
+	// 3.2 List Files - Filter by tag 'python'
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodGet, "/api/v1/files?tag=python", nil)
+	req.SetBasicAuth("testuser", "securepassword")
+	server.Engine.ServeHTTP(w, req)
+
+	_ = json.Unmarshal(w.Body.Bytes(), &fileList)
+	if len(fileList) != 1 {
+		t.Fatalf("Expected 1 file with tag 'python', got %d", len(fileList))
+	}
+	if fileList[0].ID != fileRecord2.ID {
+		t.Fatalf("Expected list item ID '%s', got '%s'", fileRecord2.ID, fileList[0].ID)
+	}
+
+	// 3.3 List Files - Filter by non-existent tag 'ruby'
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodGet, "/api/v1/files?tag=ruby", nil)
+	req.SetBasicAuth("testuser", "securepassword")
+	server.Engine.ServeHTTP(w, req)
+
+	_ = json.Unmarshal(w.Body.Bytes(), &fileList)
+	// 3.4 Delete python file to avoid mock vector search collisions
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodDelete, "/api/v1/files/"+fileRecord2.ID, nil)
+	req.SetBasicAuth("testuser", "securepassword")
+	server.Engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Failed to delete second test file: %s", w.Body.String())
 	}
 
 	// 4. Download File

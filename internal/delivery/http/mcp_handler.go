@@ -31,6 +31,7 @@ func NewMCPHandler(fileUsecase *usecase.FileUsecase) *MCPHandler {
 	// 1. Register list_files tool
 	listFilesTool := mcp.NewTool("list_files",
 		mcp.WithDescription("列出當前使用者上傳的所有檔案清單"),
+		mcp.WithString("tag", mcp.Description("過濾特定的檔案標籤（選填）")),
 	)
 	mcpServer.AddTool(listFilesTool, h.handleListFiles)
 
@@ -85,7 +86,19 @@ func (h *MCPHandler) handleListFiles(ctx context.Context, request mcp.CallToolRe
 		return nil, fmt.Errorf("unauthorized")
 	}
 
-	files, err := h.fileUsecase.List(ctx, dbUser.ID)
+	args, ok := request.Params.Arguments.(map[string]any)
+	if !ok {
+		args = make(map[string]any)
+	}
+
+	var tag string
+	if tagVal, exists := args["tag"]; exists {
+		if t, ok := tagVal.(string); ok {
+			tag = t
+		}
+	}
+
+	files, err := h.fileUsecase.List(ctx, dbUser.ID, tag)
 	if err != nil {
 		slog.Error("MCP list_files tool failed", "user_id", dbUser.ID, "error", err)
 		return nil, fmt.Errorf("failed to list files: %w", err)

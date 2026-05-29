@@ -23,6 +23,7 @@ type FileResponse struct {
 	Size        int64     `json:"size"`
 	ContentType string    `json:"content_type"`
 	OwnerID     string    `json:"owner_id"`
+	Tags        []string  `json:"tags"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }

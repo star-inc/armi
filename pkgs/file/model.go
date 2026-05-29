@@ -10,6 +10,7 @@ type FileRecord struct {
 	Size        int64
 	ContentType string
 	OwnerID     string
+	Tags        []string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }

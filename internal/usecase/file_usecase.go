@@ -68,6 +68,7 @@ func toFileResponse(f *file.FileRecord) contract.FileResponse {
 		Size:        f.Size,
 		ContentType: f.ContentType,
 		OwnerID:     f.OwnerID,
+		Tags:        f.Tags,
 		CreatedAt:   f.CreatedAt,
 		UpdatedAt:   f.UpdatedAt,
 	}
@@ -81,6 +82,7 @@ func (uc *FileUsecase) Upload(
 	contentType string,
 	content []byte,
 	transferID string,
+	tags []string,
 ) (*contract.FileResponse, error) {
 	totalBytes := int64(len(content))
 
@@ -140,6 +142,7 @@ func (uc *FileUsecase) Upload(
 		Size:        totalBytes,
 		ContentType: contentType,
 		OwnerID:     userID,
+		Tags:        tags,
 	}
 
 	err = uc.fileRepo.Create(ctx, newRecord)
@@ -301,8 +304,8 @@ func (uc *FileUsecase) embedSync(
 	return nil
 }
 
-func (uc *FileUsecase) List(ctx context.Context, userID string) ([]contract.FileResponse, error) {
-	files, err := uc.fileRepo.ListByOwnerID(ctx, userID)
+func (uc *FileUsecase) List(ctx context.Context, userID string, tag string) ([]contract.FileResponse, error) {
+	files, err := uc.fileRepo.ListByOwnerID(ctx, userID, tag)
 	if err != nil {
 		slog.Error("failed to list user files", "user_id", userID, "error", err)
 		return nil, err

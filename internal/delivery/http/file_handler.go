@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/rs/xid"
@@ -94,6 +95,28 @@ func (h *FileHandler) Upload(c *gin.Context) {
 		}
 	}
 
+	tags := c.PostFormArray("tags")
+	if len(tags) == 0 {
+		if tagStr := c.PostForm("tags"); tagStr != "" {
+			parts := strings.Split(tagStr, ",")
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					tags = append(tags, p)
+				}
+			}
+		}
+	} else if len(tags) == 1 && strings.Contains(tags[0], ",") {
+		parts := strings.Split(tags[0], ",")
+		tags = []string{}
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				tags = append(tags, p)
+			}
+		}
+	}
+
 	resp, err := h.fileUsecase.Upload(
 		c.Request.Context(),
 		dbUser.ID,
@@ -101,6 +124,7 @@ func (h *FileHandler) Upload(c *gin.Context) {
 		fileHeader.Header.Get("Content-Type"),
 		content.Bytes(),
 		transferID,
+		tags,
 	)
 	if err != nil {
 		if err.Error() == "file conflict: identical file or filename already exists" {
@@ -132,7 +156,8 @@ func (h *FileHandler) List(c *gin.Context) {
 	}
 	dbUser := val.(*user.User)
 
-	files, err := h.fileUsecase.List(c.Request.Context(), dbUser.ID)
+	tag := c.Query("tag")
+	files, err := h.fileUsecase.List(c.Request.Context(), dbUser.ID, tag)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
