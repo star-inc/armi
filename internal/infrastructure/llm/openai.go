@@ -55,7 +55,7 @@ func (l *OpenAILLM) GenerateQueries(ctx context.Context, query string, num int) 
 		return []string{}, nil
 	}
 
-	prompt := fmt.Sprintf("請針對下述搜尋關鍵字/語句，生成 %d 個不同的同義/搜尋問法（每行返回一個問法，不需編號或任何解釋）。\n\n搜尋關鍵字：%s", num, query)
+	prompt := fmt.Sprintf("Generate %d different search queries or synonymous phrasings for the following search query/phrase. Return one phrasing per line, without any numbering or explanation.\n\nSearch query: %s", num, query)
 
 	resp, err := l.Client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
 		Model: l.ModelName,
@@ -116,7 +116,7 @@ func (l *OpenAILLM) PerformOCR(ctx context.Context, imageBase64 string) (string,
 				MultiContent: []openai.ChatMessagePart{
 					{
 						Type: openai.ChatMessagePartTypeText,
-						Text: "請精確且不做任何解釋地，將這張圖片中的所有文字辨識並重現出來。保持原本的換行與格式。",
+						Text: "Precisely recognize and transcribe all text in this image without any explanation. Maintain the original line breaks and formatting.",
 					},
 					{
 						Type: openai.ChatMessagePartTypeImageURL,
