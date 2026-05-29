@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/lu4p/cat"
 )
@@ -18,7 +19,10 @@ func ExtractText(content []byte, filename string) (string, error) {
 		return "", nil
 	}
 
-	ext := filepath.Ext(filename)
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == ".md" || ext == ".txt" {
+		return string(content), nil
+	}
 	// Create a temp file that matches the original extension to help the cat parser identify it
 	tempFile, err := os.CreateTemp("", "armi-upload-*"+ext)
 	if err != nil {

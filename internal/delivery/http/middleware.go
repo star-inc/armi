@@ -178,6 +178,7 @@ func FileValidationMiddleware(publisher file.EventPublisher) gin.HandlerFunc {
 		".pptx": true,
 		".txt":  true,
 		".rtf":  true,
+		".md":   true,
 	}
 
 	return func(c *gin.Context) {
