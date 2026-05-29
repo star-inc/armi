@@ -1,8 +1,10 @@
-TARGET_DIRECTORY := $(shell pwd)
+WORKPLACE := $(shell pwd)
 
-target:
-	@mkdir -p $(TARGET_DIRECTORY)/build
-	cd cmd/armi && go build -o $(TARGET_DIRECTORY)/build
+.PHONY: build-image clean-image run
+
+build:
+	@mkdir -p $(WORKPLACE)/build
+	cd cmd/armi && go build -o $(WORKPLACE)/build
 
 clean: clean-deps
 	rm -rf $(WORKPLACE)/build
@@ -10,9 +12,18 @@ clean: clean-deps
 clean-deps:
 	go clean -cache
 
+image:
+	docker build -t armi:local .
+
+image-clean:
+	docker rmi armi:local || true
+
+image-run: image-clean image
+	docker run --rm -p 8080:8080 armi:local
+
 dev:
 	@go install github.com/air-verse/air@latest
-	cd $(TARGET_DIRECTORY) && air
+	cd $(WORKPLACE) && air
 
 test: clean
 	go test ./... -coverprofile=coverage.out
