@@ -62,6 +62,10 @@ func NewMCPHandler(fileUsecase *usecase.FileUsecase) *MCPHandler {
 	return h
 }
 
+type mcpContextKey string
+
+const userCtxKey mcpContextKey = "user"
+
 // MCPContextMiddleware extracts the user from Gin's Context and injects it into http.Request Context
 // so that it can be retrieved within mcp-go ToolHandlers.
 func MCPContextMiddleware() gin.HandlerFunc {
@@ -70,7 +74,7 @@ func MCPContextMiddleware() gin.HandlerFunc {
 		if ok {
 			dbUser, ok := val.(*user.User)
 			if ok {
-				ctx := context.WithValue(c.Request.Context(), "user", dbUser)
+				ctx := context.WithValue(c.Request.Context(), userCtxKey, dbUser)
 				c.Request = c.Request.WithContext(ctx)
 			}
 		}
@@ -79,7 +83,7 @@ func MCPContextMiddleware() gin.HandlerFunc {
 }
 
 func (h *MCPHandler) handleListFiles(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	dbUser, ok := ctx.Value("user").(*user.User)
+	dbUser, ok := ctx.Value(userCtxKey).(*user.User)
 	if !ok {
 		slog.Warn("MCP tool list_files invoked without authenticated user context")
 		return nil, fmt.Errorf("unauthorized")
@@ -116,7 +120,7 @@ func (h *MCPHandler) handleListFiles(ctx context.Context, request mcp.CallToolRe
 }
 
 func (h *MCPHandler) handleSearchFiles(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	dbUser, ok := ctx.Value("user").(*user.User)
+	dbUser, ok := ctx.Value(userCtxKey).(*user.User)
 	if !ok {
 		slog.Warn("MCP tool search_files invoked without authenticated user context")
 		return nil, fmt.Errorf("unauthorized")
@@ -176,7 +180,7 @@ func (h *MCPHandler) handleSearchFiles(ctx context.Context, request mcp.CallTool
 }
 
 func (h *MCPHandler) handleReadFile(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	dbUser, ok := ctx.Value("user").(*user.User)
+	dbUser, ok := ctx.Value(userCtxKey).(*user.User)
 	if !ok {
 		slog.Warn("MCP tool read_file invoked without authenticated user context")
 		return nil, fmt.Errorf("unauthorized")

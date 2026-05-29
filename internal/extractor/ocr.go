@@ -44,6 +44,7 @@ func PerformOCRForPDF(ctx context.Context, pdfContent []byte, llm file.LLM) (str
 	cmd := exec.CommandContext(ctx, "gs",
 		"-dNOPAUSE",
 		"-dBATCH",
+		"-dSAFER",
 		"-sDEVICE=png16m",
 		"-r150",
 		"-sOutputFile="+outputPattern,
@@ -135,7 +136,7 @@ func PerformOCRForPPTX(ctx context.Context, pptxContent []byte, llm file.LLM) (s
 					continue
 				}
 
-				imgBytes, err := io.ReadAll(rc)
+				imgBytes, err := io.ReadAll(io.LimitReader(rc, 32*1024*1024))
 				_ = rc.Close()
 				if err != nil {
 					slog.Error("failed to read media file content in PPTX", "name", f.Name, "error", err)

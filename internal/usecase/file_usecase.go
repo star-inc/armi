@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/go-ego/gse"
 	"github.com/rs/xid"
@@ -168,6 +169,12 @@ func (uc *FileUsecase) Upload(
 			// Roll back: delete the DB record so the upload appears as if it never happened.
 			if delErr := uc.fileRepo.Delete(ctx, fileID); delErr != nil {
 				slog.Error("failed to roll back file record after embedding error", "file_id", fileID, "error", delErr)
+			}
+			// Roll back physical file if it was newly created
+			if globalCount == 0 {
+				if storeDelErr := uc.storage.Delete(ctx, "sha3-256-"+sha3Hash); storeDelErr != nil {
+					slog.Error("failed to roll back physical file after embedding error", "key", "sha3-256-"+sha3Hash, "error", storeDelErr)
+				}
 			}
 			return nil, fmt.Errorf("embedding failed: %w", embedErr)
 		}
@@ -530,51 +537,62 @@ func (uc *FileUsecase) Search(
 	mergedCandidates := make(map[string]candidate)
 	fileCache := make(map[string]*file.FileRecord)
 
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
 	for _, q := range targetQueries {
-		// Generate embedding for query text
-		queryEmbedding, err := uc.embedder.Embed(ctx, q)
-		if err != nil {
-			slog.Error("failed to generate search query embedding", "query", q, "error", err)
-			continue
-		}
+		wg.Add(1)
+		go func(q string) {
+			defer wg.Done()
 
-		// Perform vector and keyword hybrid search
-		searchResults, err := uc.vectorDB.Search(ctx, queryEmbedding, keywords, limit)
-		if err != nil {
-			slog.Error("vector database search failed", "query", q, "error", err)
-			continue
-		}
+			// Generate embedding for query text
+			queryEmbedding, err := uc.embedder.Embed(ctx, q)
+			if err != nil {
+				slog.Error("failed to generate search query embedding", "query", q, "error", err)
+				return
+			}
 
-		// Filter by ownership and populate merge candidates
-		for _, res := range searchResults {
-			r, exists := fileCache[res.FileID]
-			if !exists {
-				var err error
-				r, err = uc.fileRepo.GetByID(ctx, res.FileID)
-				if err != nil {
-					fileCache[res.FileID] = nil
+			// Perform vector and keyword hybrid search
+			searchResults, err := uc.vectorDB.Search(ctx, queryEmbedding, keywords, limit)
+			if err != nil {
+				slog.Error("vector database search failed", "query", q, "error", err)
+				return
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			// Filter by ownership and populate merge candidates
+			for _, res := range searchResults {
+				r, exists := fileCache[res.FileID]
+				if !exists {
+					var err error
+					r, err = uc.fileRepo.GetByID(ctx, res.FileID)
+					if err != nil {
+						fileCache[res.FileID] = nil
+						continue
+					}
+					fileCache[res.FileID] = r
+				}
+				if r == nil || r.OwnerID != userID {
 					continue
 				}
-				fileCache[res.FileID] = r
-			}
-			if r == nil || r.OwnerID != userID {
-				continue
-			}
 
-			score := 1.0 - res.Distance
-			existing, exists := mergedCandidates[res.ChunkID]
-			if !exists || score > existing.score {
-				mergedCandidates[res.ChunkID] = candidate{
-					record:      r,
-					chunkID:     res.ChunkID,
-					chunkText:   res.Text,
-					distance:    res.Distance,
-					score:       score,
-					sourceQuery: q,
+				score := 1.0 - res.Distance
+				existing, exists := mergedCandidates[res.ChunkID]
+				if !exists || score > existing.score {
+					mergedCandidates[res.ChunkID] = candidate{
+						record:      r,
+						chunkID:     res.ChunkID,
+						chunkText:   res.Text,
+						distance:    res.Distance,
+						score:       score,
+						sourceQuery: q,
+					}
 				}
 			}
-		}
+		}(q)
 	}
+	wg.Wait()
 
 	var candidatesList []candidate
 	for _, c := range mergedCandidates {

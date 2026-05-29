@@ -183,8 +183,8 @@ func (c *EmbeddingConsumer) handle(ctx context.Context, d amqp.Delivery) {
 			"file_id": job.FileID,
 			"error":   processErr.Error(),
 		})
-		// Nack without requeue to avoid poison-pill loops; move to DLQ if configured
-		if nackErr := d.Nack(false, false); nackErr != nil {
+		// Nack with requeue if not already redelivered to handle transient errors
+		if nackErr := d.Nack(false, !d.Redelivered); nackErr != nil {
 			slog.Error("embedding consumer: failed to Nack failed job", "job_id", job.JobID, "error", nackErr)
 		}
 		return
