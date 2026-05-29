@@ -101,3 +101,43 @@ func (l *OpenAILLM) GenerateQueries(ctx context.Context, query string, num int) 
 	slog.Info("Successfully generated expanded queries", "original", query, "expanded", result)
 	return result, nil
 }
+
+// PerformOCR performs OCR on a base64 encoded image using OpenAI Vision API.
+func (l *OpenAILLM) PerformOCR(ctx context.Context, imageBase64 string) (string, error) {
+	if imageBase64 == "" {
+		return "", nil
+	}
+
+	resp, err := l.Client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+		Model: l.ModelName,
+		Messages: []openai.ChatCompletionMessage{
+			{
+				Role: openai.ChatMessageRoleUser,
+				MultiContent: []openai.ChatMessagePart{
+					{
+						Type: openai.ChatMessagePartTypeText,
+						Text: "請精確且不做任何解釋地，將這張圖片中的所有文字辨識並重現出來。保持原本的換行與格式。",
+					},
+					{
+						Type: openai.ChatMessagePartTypeImageURL,
+						ImageURL: &openai.ChatMessageImageURL{
+							URL: "data:image/png;base64," + imageBase64,
+						},
+					},
+				},
+			},
+		},
+		Temperature: 0.1,
+	})
+	if err != nil {
+		slog.Error("OpenAI Chat Completion request failed in PerformOCR", "error", err)
+		return "", fmt.Errorf("failed to perform OCR via OpenAI: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		slog.Warn("OpenAI returned no chat completion choices for PerformOCR")
+		return "", nil
+	}
+
+	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+}

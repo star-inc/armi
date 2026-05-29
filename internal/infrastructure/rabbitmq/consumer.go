@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ type EmbeddingConsumer struct {
 	vectorDB  file.VectorDB
 	storage   file.Storage
 	publisher file.EventPublisher
+	llm       file.LLM
 }
 
 // NewEmbeddingConsumer creates an EmbeddingConsumer connected to RabbitMQ.
@@ -37,6 +39,7 @@ func NewEmbeddingConsumer(
 	vectorDB file.VectorDB,
 	storage file.Storage,
 	publisher file.EventPublisher,
+	llm file.LLM,
 ) (*EmbeddingConsumer, error) {
 	if !viper.GetBool("rabbitmq.enabled") {
 		slog.Info("RabbitMQ is disabled, embedding consumer will not start")
@@ -86,6 +89,7 @@ func NewEmbeddingConsumer(
 		vectorDB:  vectorDB,
 		storage:   storage,
 		publisher: publisher,
+		llm:       llm,
 	}, nil
 }
 
@@ -216,6 +220,28 @@ func (c *EmbeddingConsumer) handleEmbed(ctx context.Context, job contract.Embedd
 		// Text extraction failure is a system-level error (e.g. corrupted file, unsupported format).
 		// Return the error so handle() publishes embedding.failed as an alert.
 		return fmt.Errorf("text extraction failed: %w", err)
+	}
+	if text == "" && c.llm != nil {
+		lowerFilename := strings.ToLower(job.Filename)
+		if strings.HasSuffix(lowerFilename, ".pdf") {
+			slog.Info("embedding consumer: extracted text is empty, trying OCR on PDF pages", "job_id", job.JobID, "filename", job.Filename)
+			ocrText, ocrErr := extractor.PerformOCRForPDF(ctx, data, c.llm)
+			if ocrErr == nil && ocrText != "" {
+				text = ocrText
+				slog.Info("embedding consumer: successfully extracted text via PDF OCR", "job_id", job.JobID, "filename", job.Filename, "text_len", len(text))
+			} else if ocrErr != nil {
+				slog.Warn("embedding consumer: PDF OCR fallback failed", "job_id", job.JobID, "filename", job.Filename, "error", ocrErr)
+			}
+		} else if strings.HasSuffix(lowerFilename, ".pptx") || strings.HasSuffix(lowerFilename, ".ppt") {
+			slog.Info("embedding consumer: extracted text is empty, trying OCR on PPTX embedded images", "job_id", job.JobID, "filename", job.Filename)
+			ocrText, ocrErr := extractor.PerformOCRForPPTX(ctx, data, c.llm)
+			if ocrErr == nil && ocrText != "" {
+				text = ocrText
+				slog.Info("embedding consumer: successfully extracted text via PPTX OCR", "job_id", job.JobID, "filename", job.Filename, "text_len", len(text))
+			} else if ocrErr != nil {
+				slog.Warn("embedding consumer: PPTX OCR fallback failed", "job_id", job.JobID, "filename", job.Filename, "error", ocrErr)
+			}
+		}
 	}
 	if text == "" {
 		slog.Info("embedding consumer: no text extracted, skipping embedding", "job_id", job.JobID)

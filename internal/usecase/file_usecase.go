@@ -250,6 +250,28 @@ func (uc *FileUsecase) embedSync(
 		if extractErr != nil {
 			return fmt.Errorf("text extraction failed: %w", extractErr)
 		}
+		if text == "" && uc.llm != nil {
+			lowerFilename := strings.ToLower(filename)
+			if strings.HasSuffix(lowerFilename, ".pdf") {
+				slog.Info("Extracted text is empty, trying OCR on PDF pages", "filename", filename)
+				ocrText, ocrErr := extractor.PerformOCRForPDF(ctx, content, uc.llm)
+				if ocrErr == nil && ocrText != "" {
+					text = ocrText
+					slog.Info("Successfully extracted text via PDF OCR", "filename", filename, "text_len", len(text))
+				} else if ocrErr != nil {
+					slog.Warn("PDF OCR fallback failed", "filename", filename, "error", ocrErr)
+				}
+			} else if strings.HasSuffix(lowerFilename, ".pptx") || strings.HasSuffix(lowerFilename, ".ppt") {
+				slog.Info("Extracted text is empty, trying OCR on PPTX embedded images", "filename", filename)
+				ocrText, ocrErr := extractor.PerformOCRForPPTX(ctx, content, uc.llm)
+				if ocrErr == nil && ocrText != "" {
+					text = ocrText
+					slog.Info("Successfully extracted text via PPTX OCR", "filename", filename, "text_len", len(text))
+				} else if ocrErr != nil {
+					slog.Warn("PPTX OCR fallback failed", "filename", filename, "error", ocrErr)
+				}
+			}
+		}
 		if text == "" {
 			// No extractable text — not a fatal error, skip silently.
 			return nil

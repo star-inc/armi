@@ -104,7 +104,7 @@ func main() {
 	}()
 
 	// 6.6 Initialize and start Embedding Consumer (no-op when RabbitMQ is disabled)
-	consumer, err := rabbitmq.NewEmbeddingConsumer(embedder, vectorDB, store, publisher)
+	consumer, err := rabbitmq.NewEmbeddingConsumer(embedder, vectorDB, store, publisher, llmService)
 	if err != nil {
 		slog.Warn("RabbitMQ embedding consumer initialization failed, falling back to sync embedding", "error", err)
 	}
