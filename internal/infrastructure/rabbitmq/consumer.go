@@ -234,16 +234,32 @@ func (c *EmbeddingConsumer) handleEmbed(ctx context.Context, job contract.Embedd
 	})
 
 	// Generate embedding
-	embeddingVal, err := c.embedder.Embed(ctx, text)
-	if err != nil {
-		slog.Error("embedding provider error (async)", "job_id", job.JobID, "file_id", job.FileID, "error", err)
-		return err
+	chunkSize := viper.GetInt("chunk.size")
+	if chunkSize <= 0 {
+		chunkSize = 1000
+	}
+	chunkOverlap := viper.GetInt("chunk.overlap")
+	if chunkOverlap < 0 {
+		chunkOverlap = 200
 	}
 
-	// Insert into vector DB — use a background context so the job finishes
-	// even if the original request context has been cancelled.
-	insertCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	chunks := extractor.SplitText(text, chunkSize, chunkOverlap)
+	for i, chunk := range chunks {
+		embeddingVal, err := c.embedder.Embed(ctx, chunk)
+		if err != nil {
+			slog.Error("embedding provider error (async)", "job_id", job.JobID, "file_id", job.FileID, "chunk_index", i, "error", err)
+			return err
+		}
 
-	return c.vectorDB.Insert(insertCtx, job.FileID, embeddingVal)
+		// Insert into vector DB — use a background context so the job finishes
+		// even if the original request context has been cancelled.
+		insertCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.vectorDB.Insert(insertCtx, job.FileID, i, chunk, embeddingVal); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

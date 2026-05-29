@@ -59,6 +59,10 @@ func InitConfig() {
 	viper.SetDefault("vector.qdrant.url", "http://localhost:6333")
 	viper.SetDefault("vector.qdrant.collection", "armi_files")
 
+	// Chunk Defaults
+	viper.SetDefault("chunk.size", 1000)
+	viper.SetDefault("chunk.overlap", 200)
+
 	// RabbitMQ Defaults
 	viper.SetDefault("rabbitmq.enabled", false)
 	viper.SetDefault("rabbitmq.url", "amqp://guest:guest@localhost:5672/")

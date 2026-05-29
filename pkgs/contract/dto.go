@@ -33,4 +33,6 @@ type SearchResponseItem struct {
 	Distance    float32 `json:"distance"`
 	Score       float32 `json:"score"`
 	SourceQuery string  `json:"source_query"`
+	ChunkID     string  `json:"chunk_id,omitempty"`
+	ChunkText   string  `json:"chunk_text,omitempty"`
 }

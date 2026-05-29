@@ -204,6 +204,9 @@ func TestHandlersFlow(t *testing.T) {
 	if searchResults[0].SourceQuery == "" {
 		t.Fatalf("Expected search item to have a non-empty source_query")
 	}
+	if searchResults[0].ChunkText == "" {
+		t.Fatalf("Expected search item to have a non-empty chunk_text")
+	}
 
 	// 7. Delete File
 	w = httptest.NewRecorder()

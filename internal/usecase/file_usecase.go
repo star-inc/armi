@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 
+	"github.com/go-ego/gse"
 	"github.com/rs/xid"
 	"github.com/spf13/viper"
 	"github.com/supersonictw/armi/internal/extractor"
@@ -25,6 +27,7 @@ type FileUsecase struct {
 	llm          file.LLM
 	publisher    file.EventPublisher
 	jobPublisher file.EmbeddingJobPublisher // nil when RabbitMQ is unavailable
+	segmenter    *gse.Segmenter
 }
 
 func NewFileUsecase(
@@ -36,6 +39,15 @@ func NewFileUsecase(
 	publisher file.EventPublisher,
 	jobPublisher file.EmbeddingJobPublisher,
 ) *FileUsecase {
+	var segmenter *gse.Segmenter
+	seg, err := gse.New("zh")
+	if err != nil {
+		slog.Warn("failed to initialize gse segmenter, word segmentation will be skipped", "error", err)
+	} else {
+		segmenter = &seg
+		slog.Info("Initialized gse segmenter successfully")
+	}
+
 	return &FileUsecase{
 		fileRepo:     fileRepo,
 		storage:      storage,
@@ -44,6 +56,7 @@ func NewFileUsecase(
 		llm:          llm,
 		publisher:    publisher,
 		jobPublisher: jobPublisher,
+		segmenter:    segmenter,
 	}
 }
 
@@ -241,13 +254,26 @@ func (uc *FileUsecase) embedSync(
 			// No extractable text — not a fatal error, skip silently.
 			return nil
 		}
-		embeddingVal, embedErr := uc.embedder.Embed(ctx, text)
-		if embedErr != nil {
-			slog.Error("embedding provider error (sync)", "file_id", fileID, "error", embedErr)
-			return fmt.Errorf("embedding model error: %w", embedErr)
+
+		chunkSize := viper.GetInt("chunk.size")
+		if chunkSize <= 0 {
+			chunkSize = 1000
 		}
-		if err := uc.vectorDB.Insert(ctx, fileID, embeddingVal); err != nil {
-			return fmt.Errorf("vector insert failed: %w", err)
+		chunkOverlap := viper.GetInt("chunk.overlap")
+		if chunkOverlap < 0 {
+			chunkOverlap = 200
+		}
+
+		chunks := extractor.SplitText(text, chunkSize, chunkOverlap)
+		for i, chunk := range chunks {
+			embeddingVal, embedErr := uc.embedder.Embed(ctx, chunk)
+			if embedErr != nil {
+				slog.Error("embedding provider error (sync)", "file_id", fileID, "chunk_index", i, "error", embedErr)
+				return fmt.Errorf("embedding model error at chunk %d: %w", i, embedErr)
+			}
+			if err := uc.vectorDB.Insert(ctx, fileID, i, chunk, embeddingVal); err != nil {
+				return fmt.Errorf("vector insert failed at chunk %d: %w", i, err)
+			}
 		}
 	}
 	return nil
@@ -434,8 +460,25 @@ func (uc *FileUsecase) Search(
 		}
 	}
 
+	var keywords []string
+	if uc.segmenter != nil {
+		words := uc.segmenter.Cut(query, true)
+		for _, w := range words {
+			w = strings.TrimSpace(w)
+			runes := []rune(w)
+			if len(runes) > 1 {
+				keywords = append(keywords, w)
+			}
+		}
+		if len(keywords) > 0 {
+			slog.Info("Segmented search query", "query", query, "keywords", keywords)
+		}
+	}
+
 	type candidate struct {
 		record      *file.FileRecord
+		chunkID     string
+		chunkText   string
 		distance    float32
 		score       float32
 		sourceQuery string
@@ -451,8 +494,8 @@ func (uc *FileUsecase) Search(
 			continue
 		}
 
-		// Perform vector search
-		searchResults, err := uc.vectorDB.Search(ctx, queryEmbedding, limit)
+		// Perform vector and keyword hybrid search
+		searchResults, err := uc.vectorDB.Search(ctx, queryEmbedding, keywords, limit)
 		if err != nil {
 			slog.Error("vector database search failed", "query", q, "error", err)
 			continue
@@ -466,10 +509,12 @@ func (uc *FileUsecase) Search(
 			}
 
 			score := 1.0 - res.Distance
-			existing, exists := mergedCandidates[res.FileID]
+			existing, exists := mergedCandidates[res.ChunkID]
 			if !exists || score > existing.score {
-				mergedCandidates[res.FileID] = candidate{
+				mergedCandidates[res.ChunkID] = candidate{
 					record:      r,
+					chunkID:     res.ChunkID,
+					chunkText:   res.Text,
 					distance:    res.Distance,
 					score:       score,
 					sourceQuery: q,
@@ -510,6 +555,8 @@ func (uc *FileUsecase) Search(
 			Distance:    c.distance,
 			Score:       c.score,
 			SourceQuery: c.sourceQuery,
+			ChunkID:     c.chunkID,
+			ChunkText:   c.chunkText,
 		})
 	}
 

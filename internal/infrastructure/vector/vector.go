@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
@@ -74,7 +75,7 @@ func toUUID(fileID string) string {
 // === SQLiteVectorDB ===
 
 // Insert saves embedding vector into sqlite-vec.
-func (s *SQLiteVectorDB) Insert(ctx context.Context, fileID string, embedding []float32) error {
+func (s *SQLiteVectorDB) Insert(ctx context.Context, fileID string, chunkIndex int, text string, embedding []float32) error {
 	if database.DB == nil {
 		return fmt.Errorf("rdbms database not initialized")
 	}
@@ -85,13 +86,14 @@ func (s *SQLiteVectorDB) Insert(ctx context.Context, fileID string, embedding []
 		return fmt.Errorf("failed to serialize vector: %w", serializeErr)
 	}
 
+	chunkID := fmt.Sprintf("%s_%d", fileID, chunkIndex)
 	err := database.DB.WithContext(ctx).Exec(
-		"INSERT OR REPLACE INTO file_embeddings(file_id, embedding) VALUES (?, ?)",
-		fileID, serialized,
+		"INSERT OR REPLACE INTO file_embeddings(chunk_id, file_id, text, embedding) VALUES (?, ?, ?, ?)",
+		chunkID, fileID, text, serialized,
 	).Error
 
 	if err != nil {
-		slog.Error("sqlite-vec insert failed", "file_id", fileID, "error", err)
+		slog.Error("sqlite-vec insert failed", "chunk_id", chunkID, "file_id", fileID, "error", err)
 		return fmt.Errorf("failed to insert vector into sqlite-vec: %w", err)
 	}
 
@@ -105,8 +107,8 @@ func (s *SQLiteVectorDB) Copy(ctx context.Context, srcFileID string, destFileID 
 	}
 
 	err := database.DB.WithContext(ctx).Exec(
-		"INSERT INTO file_embeddings(file_id, embedding) SELECT ?, embedding FROM file_embeddings WHERE file_id = ?",
-		destFileID, srcFileID,
+		"INSERT INTO file_embeddings(chunk_id, file_id, text, embedding) SELECT replace(chunk_id, ?, ?), ?, text, embedding FROM file_embeddings WHERE file_id = ?",
+		srcFileID, destFileID, destFileID, srcFileID,
 	).Error
 
 	if err != nil {
@@ -117,8 +119,8 @@ func (s *SQLiteVectorDB) Copy(ctx context.Context, srcFileID string, destFileID 
 	return nil
 }
 
-// Search queries sqlite-vec for similar vectors.
-func (s *SQLiteVectorDB) Search(ctx context.Context, embedding []float32, limit int) ([]file.SearchResult, error) {
+// Search queries sqlite-vec for similar vectors and keywords.
+func (s *SQLiteVectorDB) Search(ctx context.Context, embedding []float32, keywords []string, limit int) ([]file.SearchResult, error) {
 	if database.DB == nil {
 		return nil, fmt.Errorf("rdbms database not initialized")
 	}
@@ -129,8 +131,9 @@ func (s *SQLiteVectorDB) Search(ctx context.Context, embedding []float32, limit 
 		return nil, fmt.Errorf("failed to serialize vector: %w", serializeErr)
 	}
 
+	// 1. Vector Search
 	rows, err := database.DB.WithContext(ctx).Raw(
-		"SELECT file_id, distance FROM file_embeddings WHERE embedding MATCH ? AND k = ? ORDER BY distance ASC",
+		"SELECT file_id, chunk_id, text, distance FROM file_embeddings WHERE embedding MATCH ? AND k = ? ORDER BY distance ASC",
 		serialized, limit,
 	).Rows()
 
@@ -143,13 +146,49 @@ func (s *SQLiteVectorDB) Search(ctx context.Context, embedding []float32, limit 
 	}()
 
 	var results []file.SearchResult
+	seenChunks := make(map[string]bool)
 	for rows.Next() {
 		var res file.SearchResult
-		if err := rows.Scan(&res.FileID, &res.Distance); err != nil {
+		if err := rows.Scan(&res.FileID, &res.ChunkID, &res.Text, &res.Distance); err != nil {
 			slog.Error("sqlite-vec scan row failed", "error", err)
 			return nil, fmt.Errorf("failed to scan search result row: %w", err)
 		}
 		results = append(results, res)
+		seenChunks[res.ChunkID] = true
+	}
+
+	// 2. Keyword Search
+	if len(keywords) > 0 {
+		var conditions []string
+		var args []interface{}
+		for _, kw := range keywords {
+			conditions = append(conditions, "text LIKE ?")
+			args = append(args, "%"+kw+"%")
+		}
+
+		queryStr := fmt.Sprintf(
+			"SELECT file_id, chunk_id, text FROM file_embeddings WHERE %s LIMIT ?",
+			strings.Join(conditions, " OR "),
+		)
+		args = append(args, limit)
+
+		kwRows, kwErr := database.DB.WithContext(ctx).Raw(queryStr, args...).Rows()
+		if kwErr == nil {
+			defer func() { _ = kwRows.Close() }()
+			for kwRows.Next() {
+				var res file.SearchResult
+				if err := kwRows.Scan(&res.FileID, &res.ChunkID, &res.Text); err == nil {
+					if !seenChunks[res.ChunkID] {
+						// Assign a distance of 0.5 for keyword-only matches
+						res.Distance = 0.5
+						results = append(results, res)
+						seenChunks[res.ChunkID] = true
+					}
+				}
+			}
+		} else {
+			slog.Warn("sqlite-vec keyword query failed", "error", kwErr)
+		}
 	}
 
 	return results, nil
@@ -231,7 +270,7 @@ func (q *QdrantVectorDB) ensureCollection() error {
 }
 
 // Insert saves embedding vector into Qdrant.
-func (q *QdrantVectorDB) Insert(ctx context.Context, fileID string, embedding []float32) error {
+func (q *QdrantVectorDB) Insert(ctx context.Context, fileID string, chunkIndex int, text string, embedding []float32) error {
 	base, err := url.Parse(q.URL)
 	if err != nil {
 		return fmt.Errorf("invalid qdrant url: %w", err)
@@ -240,14 +279,17 @@ func (q *QdrantVectorDB) Insert(ctx context.Context, fileID string, embedding []
 	targetURL := base.JoinPath("collections", q.Collection, "points").String()
 	targetURL = targetURL + "?wait=true"
 
-	pointUUID := toUUID(fileID)
+	chunkID := fmt.Sprintf("%s_%d", fileID, chunkIndex)
+	pointUUID := toUUID(chunkID)
 	reqBody := map[string]interface{}{
 		"points": []map[string]interface{}{
 			{
 				"id":     pointUUID,
 				"vector": embedding,
 				"payload": map[string]interface{}{
-					"file_id": fileID,
+					"file_id":  fileID,
+					"chunk_id": chunkID,
+					"text":     text,
 				},
 			},
 		},
@@ -266,7 +308,7 @@ func (q *QdrantVectorDB) Insert(ctx context.Context, fileID string, embedding []
 
 	resp, err := q.Client.Do(req)
 	if err != nil {
-		slog.Error("qdrant insert failed", "file_id", fileID, "error", err)
+		slog.Error("qdrant insert failed", "chunk_id", chunkID, "error", err)
 		return fmt.Errorf("qdrant request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -287,49 +329,125 @@ func (q *QdrantVectorDB) Copy(ctx context.Context, srcFileID string, destFileID 
 		return fmt.Errorf("invalid qdrant url: %w", err)
 	}
 
-	srcUUID := toUUID(srcFileID)
-	targetURL := base.JoinPath("collections", q.Collection, "points", srcUUID).String()
+	targetURL := base.JoinPath("collections", q.Collection, "points", "scroll").String()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	reqBody := map[string]interface{}{
+		"filter": map[string]interface{}{
+			"must": []map[string]interface{}{
+				{
+					"key": "file_id",
+					"match": map[string]interface{}{
+						"value": srcFileID,
+					},
+				},
+			},
+		},
+		"with_vector":  true,
+		"with_payload": true,
+		"limit":        500, // support up to 500 chunks
+	}
+	jsonBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		return err
 	}
 
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(jsonBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
 	resp, err := q.Client.Do(req)
 	if err != nil {
-		slog.Error("qdrant fetch point failed in Copy", "src_id", srcFileID, "error", err)
-		return fmt.Errorf("failed to fetch source vector: %w", err)
+		slog.Error("qdrant scroll points failed in Copy", "src_id", srcFileID, "error", err)
+		return fmt.Errorf("failed to fetch source vectors: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		slog.Error("qdrant fetch point returned non-OK status", "status", resp.Status, "response", string(body))
-		return fmt.Errorf("qdrant fetch point status: %s", resp.Status)
+		slog.Error("qdrant scroll returned non-OK status", "status", resp.Status, "response", string(body))
+		return fmt.Errorf("qdrant scroll status: %s", resp.Status)
 	}
 
 	var respJSON struct {
 		Result struct {
-			Vector []float32 `json:"vector"`
+			Points []struct {
+				Vector  []float32              `json:"vector"`
+				Payload map[string]interface{} `json:"payload"`
+			} `json:"points"`
 		} `json:"result"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&respJSON); err != nil {
-		slog.Error("failed to decode qdrant point fetch response", "error", err)
+		slog.Error("failed to decode qdrant scroll response", "error", err)
 		return fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	err = q.Insert(ctx, destFileID, respJSON.Result.Vector)
+	if len(respJSON.Result.Points) == 0 {
+		slog.Warn("no vectors found for source file", "src_id", srcFileID)
+		return nil
+	}
+
+	// Prepare batch upsert
+	var upsertPoints []map[string]interface{}
+	for _, p := range respJSON.Result.Points {
+		oldChunkID, _ := p.Payload["chunk_id"].(string)
+		oldText, _ := p.Payload["text"].(string)
+		
+		// Replace srcFileID with destFileID in chunk_id
+		newChunkID := strings.Replace(oldChunkID, srcFileID, destFileID, 1)
+		if newChunkID == "" || newChunkID == oldChunkID {
+			newChunkID = fmt.Sprintf("%s_copied", destFileID)
+		}
+		newUUID := toUUID(newChunkID)
+
+		upsertPoints = append(upsertPoints, map[string]interface{}{
+			"id":     newUUID,
+			"vector": p.Vector,
+			"payload": map[string]interface{}{
+				"file_id":  destFileID,
+				"chunk_id": newChunkID,
+				"text":     oldText,
+			},
+		})
+	}
+
+	upsertURL := base.JoinPath("collections", q.Collection, "points").String()
+	upsertURL = upsertURL + "?wait=true"
+
+	upsertBody := map[string]interface{}{
+		"points": upsertPoints,
+	}
+	upsertBytes, err := json.Marshal(upsertBody)
 	if err != nil {
-		slog.Error("qdrant insert copied vector failed", "dest_id", destFileID, "error", err)
-		return fmt.Errorf("failed to insert copied vector: %w", err)
+		return err
+	}
+
+	uReq, err := http.NewRequestWithContext(ctx, http.MethodPut, upsertURL, bytes.NewReader(upsertBytes))
+	if err != nil {
+		return err
+	}
+	uReq.Header.Set("Content-Type", "application/json")
+
+	uResp, err := q.Client.Do(uReq)
+	if err != nil {
+		slog.Error("qdrant copy insert failed", "dest_id", destFileID, "error", err)
+		return fmt.Errorf("qdrant upsert failed: %w", err)
+	}
+	defer func() { _ = uResp.Body.Close() }()
+
+	if uResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(uResp.Body)
+		slog.Error("qdrant upsert returned non-OK status", "status", uResp.Status, "response", string(body))
+		return fmt.Errorf("qdrant upsert status: %s", uResp.Status)
 	}
 
 	return nil
 }
 
-// Search finds similar vectors in Qdrant.
-func (q *QdrantVectorDB) Search(ctx context.Context, embedding []float32, limit int) ([]file.SearchResult, error) {
+// Search finds similar vectors in Qdrant with hybrid keyword support.
+func (q *QdrantVectorDB) Search(ctx context.Context, embedding []float32, keywords []string, limit int) ([]file.SearchResult, error) {
 	base, err := url.Parse(q.URL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid qdrant url: %w", err)
@@ -370,7 +488,9 @@ func (q *QdrantVectorDB) Search(ctx context.Context, embedding []float32, limit 
 		Result []struct {
 			Score   float32 `json:"score"`
 			Payload struct {
-				FileID string `json:"file_id"`
+				FileID  string `json:"file_id"`
+				ChunkID string `json:"chunk_id"`
+				Text    string `json:"text"`
 			} `json:"payload"`
 		} `json:"result"`
 	}
@@ -380,11 +500,75 @@ func (q *QdrantVectorDB) Search(ctx context.Context, embedding []float32, limit 
 	}
 
 	var results []file.SearchResult
+	seenChunks := make(map[string]bool)
 	for _, item := range respJSON.Result {
 		results = append(results, file.SearchResult{
 			FileID:   item.Payload.FileID,
+			ChunkID:  item.Payload.ChunkID,
+			Text:     item.Payload.Text,
 			Distance: 1.0 - item.Score,
 		})
+		seenChunks[item.Payload.ChunkID] = true
+	}
+
+	// 2. Qdrant Keyword Scroll Search
+	if len(keywords) > 0 {
+		scrollURL := base.JoinPath("collections", q.Collection, "points", "scroll").String()
+
+		var matches []map[string]interface{}
+		for _, kw := range keywords {
+			matches = append(matches, map[string]interface{}{
+				"key": "text",
+				"match": map[string]interface{}{
+					"text": kw,
+				},
+			})
+		}
+
+		scrollReqBody := map[string]interface{}{
+			"filter": map[string]interface{}{
+				"should": matches,
+			},
+			"with_payload": true,
+			"limit":        limit,
+		}
+		scrollBytes, err := json.Marshal(scrollReqBody)
+		if err == nil {
+			sReq, err := http.NewRequestWithContext(ctx, http.MethodPost, scrollURL, bytes.NewReader(scrollBytes))
+			if err == nil {
+				sReq.Header.Set("Content-Type", "application/json")
+				sResp, err := q.Client.Do(sReq)
+				if err == nil {
+					defer func() { _ = sResp.Body.Close() }()
+					if sResp.StatusCode == http.StatusOK {
+						var scrollJSON struct {
+							Result struct {
+								Points []struct {
+									Payload struct {
+										FileID  string `json:"file_id"`
+										ChunkID string `json:"chunk_id"`
+										Text    string `json:"text"`
+									} `json:"payload"`
+								} `json:"points"`
+							} `json:"result"`
+						}
+						if err := json.NewDecoder(sResp.Body).Decode(&scrollJSON); err == nil {
+							for _, p := range scrollJSON.Result.Points {
+								if !seenChunks[p.Payload.ChunkID] {
+									results = append(results, file.SearchResult{
+										FileID:   p.Payload.FileID,
+										ChunkID:  p.Payload.ChunkID,
+										Text:     p.Payload.Text,
+										Distance: 0.5, // fallback distance
+									})
+									seenChunks[p.Payload.ChunkID] = true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	return results, nil
@@ -399,9 +583,17 @@ func (q *QdrantVectorDB) Delete(ctx context.Context, fileID string) error {
 
 	targetURL := base.JoinPath("collections", q.Collection, "points", "delete").String()
 
-	pointUUID := toUUID(fileID)
 	reqBody := map[string]interface{}{
-		"points": []string{pointUUID},
+		"filter": map[string]interface{}{
+			"must": []map[string]interface{}{
+				{
+					"key": "file_id",
+					"match": map[string]interface{}{
+						"value": fileID,
+					},
+				},
+			},
+		},
 	}
 	jsonBytes, err := json.Marshal(reqBody)
 	if err != nil {
