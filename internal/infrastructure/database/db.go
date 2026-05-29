@@ -96,14 +96,14 @@ func InitDB() (*gorm.DB, error) {
 	if driver == "sqlite" && viper.GetString("vector.provider") == "sqlite-vec" {
 		var createSQL string
 		db.Raw("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'file_embeddings'").Scan(&createSQL)
-		if createSQL != "" && (!strings.Contains(createSQL, "chunk_id") || !strings.Contains(createSQL, "rowid")) {
-			slog.Info("Dropping old file_embeddings table to migrate to rowid schema")
+		if createSQL != "" && !strings.Contains(createSQL, "+chunk_id") {
+			slog.Info("Dropping old file_embeddings table to migrate to +column schema")
 			if dropErr := db.Exec("DROP TABLE file_embeddings").Error; dropErr != nil {
 				slog.Error("failed to drop old file_embeddings table", "error", dropErr)
 			}
 		}
 
-		err = db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS file_embeddings USING vec0(rowid INTEGER PRIMARY KEY, chunk_id TEXT, file_id TEXT, text TEXT, embedding FLOAT[768])").Error
+		err = db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS file_embeddings USING vec0(rowid INTEGER PRIMARY KEY, +chunk_id TEXT, +file_id TEXT, +text TEXT, embedding FLOAT[768])").Error
 		if err != nil {
 			return nil, fmt.Errorf("failed to create sqlite-vec virtual table: %w", err)
 		}
