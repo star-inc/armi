@@ -528,6 +528,7 @@ func (uc *FileUsecase) Search(
 	}
 
 	mergedCandidates := make(map[string]candidate)
+	fileCache := make(map[string]*file.FileRecord)
 
 	for _, q := range targetQueries {
 		// Generate embedding for query text
@@ -546,8 +547,17 @@ func (uc *FileUsecase) Search(
 
 		// Filter by ownership and populate merge candidates
 		for _, res := range searchResults {
-			r, err := uc.fileRepo.GetByID(ctx, res.FileID)
-			if err != nil || r == nil || r.OwnerID != userID {
+			r, exists := fileCache[res.FileID]
+			if !exists {
+				var err error
+				r, err = uc.fileRepo.GetByID(ctx, res.FileID)
+				if err != nil {
+					fileCache[res.FileID] = nil
+					continue
+				}
+				fileCache[res.FileID] = r
+			}
+			if r == nil || r.OwnerID != userID {
 				continue
 			}
 

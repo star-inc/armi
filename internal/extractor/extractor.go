@@ -32,15 +32,13 @@ func ExtractText(content []byte, filename string) (string, error) {
 
 	tempPath := tempFile.Name()
 	defer func() {
+		_ = tempFile.Close()
 		if removeErr := os.Remove(tempPath); removeErr != nil {
 			slog.Warn("failed to remove temporary file", "path", tempPath, "error", removeErr)
 		}
 	}()
 
 	if _, err := tempFile.Write(content); err != nil {
-		if closeErr := tempFile.Close(); closeErr != nil {
-			slog.Error("failed to close temporary file after write error", "path", tempPath, "error", closeErr)
-		}
 		slog.Error("failed to write content to temporary file", "path", tempPath, "error", err)
 		return "", fmt.Errorf("failed to write temp file: %w", err)
 	}

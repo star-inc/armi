@@ -148,6 +148,9 @@ func (s *SQLiteVectorDB) Copy(ctx context.Context, srcFileID string, destFileID 
 			return fmt.Errorf("failed to insert copy vector: %w", err)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("sqlite-vec copy rows iteration error: %w", err)
+	}
 
 	return nil
 }
@@ -189,6 +192,9 @@ func (s *SQLiteVectorDB) Search(ctx context.Context, embedding []float32, keywor
 		results = append(results, res)
 		seenChunks[res.ChunkID] = true
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite-vec search rows iteration error: %w", err)
+	}
 
 	// 2. Keyword Search
 	if len(keywords) > 0 {
@@ -218,6 +224,9 @@ func (s *SQLiteVectorDB) Search(ctx context.Context, embedding []float32, keywor
 						seenChunks[res.ChunkID] = true
 					}
 				}
+			}
+			if err := kwRows.Err(); err != nil {
+				slog.Warn("sqlite-vec keyword rows iteration error", "error", err)
 			}
 		} else {
 			slog.Warn("sqlite-vec keyword query failed", "error", kwErr)

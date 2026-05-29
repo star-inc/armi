@@ -280,10 +280,11 @@ func (c *EmbeddingConsumer) handleEmbed(ctx context.Context, job contract.Embedd
 		// Insert into vector DB — use a background context so the job finishes
 		// even if the original request context has been cancelled.
 		insertCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+		insertErr := c.vectorDB.Insert(insertCtx, job.FileID, i, chunk, embeddingVal)
+		cancel()
 
-		if err := c.vectorDB.Insert(insertCtx, job.FileID, i, chunk, embeddingVal); err != nil {
-			return err
+		if insertErr != nil {
+			return insertErr
 		}
 	}
 

@@ -9,5 +9,5 @@ RUN apk add --no-cache ghostscript
 ENV GIN_MODE release
 COPY --from=builder /workplace/build/armi /workplace/armi
 WORKDIR /workplace
-ENTRYPOINT /workplace/armi
+ENTRYPOINT ["/workplace/armi"]
 EXPOSE 8000
