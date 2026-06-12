@@ -20,7 +20,7 @@ image-clean:
 	docker rmi armi:local || true
 
 image-run: image-clean image
-	docker run --rm -p 8080:8080 armi:local
+	docker run --rm -p 8080:8000 armi:local
 
 dev:
 	@go install github.com/air-verse/air@latest

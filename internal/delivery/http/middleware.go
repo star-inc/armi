@@ -181,7 +181,7 @@ func handleBearerAuth(
 
 func scopesForRoute(method string, path string) []string {
 	switch {
-	case strings.HasPrefix(path, "/api/v1/files/search"), method == http.MethodGet:
+	case strings.HasPrefix(path, "/api/v1/files/search") && method == http.MethodGet:
 		return []string{"files:read"}
 	case strings.HasPrefix(path, "/api/v1/files/") && strings.HasSuffix(path, "/metadata") && method == http.MethodGet:
 		return []string{"files:read"}

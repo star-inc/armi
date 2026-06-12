@@ -68,6 +68,15 @@ func (m *ConnectionManager) Close() error {
 	return nil
 }
 
+func (m *ConnectionManager) IsOpen() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.conn != nil && !m.conn.IsClosed()
+}
+
 // ---------------------------------------------------------------------------
 // RabbitMQPublisher — broadcasts SystemEvents to armi.events (direct) and
 // embedding progress to armi.events.broadcast (fanout).
@@ -269,7 +278,7 @@ func (p *RabbitMQPublisher) IsAvailable() bool {
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.channel != nil && p.connManager != nil && p.connManager.conn != nil && !p.connManager.conn.IsClosed()
+	return p.channel != nil && p.connManager.IsOpen()
 }
 
 // Close gracefully closes RabbitMQ connection and channel resources.
@@ -448,7 +457,7 @@ func (p *RabbitMQJobPublisher) IsAvailable() bool {
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.channel != nil && p.connManager != nil && p.connManager.conn != nil && !p.connManager.conn.IsClosed()
+	return p.channel != nil && p.connManager.IsOpen()
 }
 
 // Close gracefully closes the job publisher's connection.

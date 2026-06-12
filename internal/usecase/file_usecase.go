@@ -106,6 +106,31 @@ func (uc *FileUsecase) ensureGroupPermission(ctx context.Context, userID string,
 	return file.ErrAccessDenied
 }
 
+func (uc *FileUsecase) authorizeFileAccess(ctx context.Context, userID string, record *file.FileRecord, required file.GroupPermission) error {
+	// If RBAC is disabled, bypass all access controls (delegated to Traefik/Caddy).
+	if !viper.GetBool("auth.rbac.enabled") {
+		return nil
+	}
+	// File owner/author always has full access.
+	if record.AuthorID == userID {
+		return nil
+	}
+	// If the file does not belong to any groups and user is not the owner, access is denied.
+	if len(record.GroupIDs) == 0 {
+		return file.ErrAccessDenied
+	}
+	for _, gid := range record.GroupIDs {
+		perm, ok, err := uc.fileRepo.GetGroupPermission(ctx, userID, gid)
+		if err != nil {
+			return err
+		}
+		if ok && perm >= required {
+			return nil
+		}
+	}
+	return file.ErrAccessDenied
+}
+
 // Upload handles progress reporting, conflict check, physical saving, DB entry and vector embedding.
 func (uc *FileUsecase) Upload(
 	ctx context.Context,
@@ -455,7 +480,7 @@ func (uc *FileUsecase) Download(ctx context.Context, userID string, fileID strin
 	if record == nil {
 		return nil, "", "", 0, file.ErrFileNotFound
 	}
-	if err := uc.ensureGroupPermission(ctx, userID, record.GroupIDs, file.GroupPermissionRead); err != nil {
+	if err := uc.authorizeFileAccess(ctx, userID, record, file.GroupPermissionRead); err != nil {
 		return nil, "", "", 0, err
 	}
 
@@ -488,7 +513,7 @@ func (uc *FileUsecase) GetMetadata(ctx context.Context, userID string, fileID st
 	if record == nil {
 		return nil, nil, file.ErrFileNotFound
 	}
-	if err := uc.ensureGroupPermission(ctx, userID, record.GroupIDs, file.GroupPermissionRead); err != nil {
+	if err := uc.authorizeFileAccess(ctx, userID, record, file.GroupPermissionRead); err != nil {
 		return nil, nil, err
 	}
 
@@ -520,7 +545,7 @@ func (uc *FileUsecase) UpdateMetadata(ctx context.Context, userID string, fileID
 	if record == nil {
 		return nil, file.ErrFileNotFound
 	}
-	if err := uc.ensureGroupPermission(ctx, userID, record.GroupIDs, file.GroupPermissionWrite); err != nil {
+	if err := uc.authorizeFileAccess(ctx, userID, record, file.GroupPermissionWrite); err != nil {
 		return nil, err
 	}
 	if filename != nil {
@@ -541,7 +566,7 @@ func (uc *FileUsecase) UpdateMetadata(ctx context.Context, userID string, fileID
 				cleanedGroupIDs = append(cleanedGroupIDs, trimmed)
 			}
 		}
-		if err := uc.ensureGroupPermission(ctx, userID, record.GroupIDs, file.GroupPermissionManage); err != nil {
+		if err := uc.authorizeFileAccess(ctx, userID, record, file.GroupPermissionManage); err != nil {
 			return nil, err
 		}
 		if err := uc.ensureGroupPermission(ctx, userID, cleanedGroupIDs, file.GroupPermissionManage); err != nil {
@@ -583,7 +608,7 @@ func (uc *FileUsecase) Delete(ctx context.Context, userID string, fileID string)
 	if record == nil {
 		return false, file.ErrFileNotFound
 	}
-	if err := uc.ensureGroupPermission(ctx, userID, record.GroupIDs, file.GroupPermissionManage); err != nil {
+	if err := uc.authorizeFileAccess(ctx, userID, record, file.GroupPermissionManage); err != nil {
 		return false, err
 	}
 
@@ -763,7 +788,7 @@ func (uc *FileUsecase) Search(
 				if r == nil {
 					continue
 				}
-				if err := uc.ensureGroupPermission(ctx, userID, r.GroupIDs, file.GroupPermissionRead); err != nil {
+				if err := uc.authorizeFileAccess(ctx, userID, r, file.GroupPermissionRead); err != nil {
 					continue
 				}
 

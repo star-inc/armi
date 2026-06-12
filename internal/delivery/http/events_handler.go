@@ -49,17 +49,17 @@ func (h *EventsHandler) Stream(c *gin.Context) {
 	h.hub.Register(dbUser.ID, ch)
 	defer h.hub.Unregister(ch)
 
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
-	c.Status(http.StatusOK)
-
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, contract.ErrorResponse{Error: "streaming not supported"})
 		return
 	}
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
 
 	_, _ = fmt.Fprint(c.Writer, ": connected\n\n")
 	flusher.Flush()
