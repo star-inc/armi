@@ -3,27 +3,26 @@ package rabbitmq
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/star-inc/armi/internal/embedding"
+	"github.com/star-inc/armi/pkgs/contract"
+	"github.com/star-inc/armi/pkgs/file"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/spf13/viper"
-	"github.com/supersonictw/armi/internal/extractor"
-	"github.com/supersonictw/armi/pkgs/contract"
-	"github.com/supersonictw/armi/pkgs/file"
 )
 
 // EmbeddingConsumer consumes EmbeddingJob messages from the work queue and
 // performs text extraction, embedding generation, and vector DB insertion.
 // Progress events are broadcast via the EventPublisher.
 type EmbeddingConsumer struct {
-	conn      *amqp.Connection
-	channel   *amqp.Channel
-	mu        sync.Mutex
-	queueName string
+	mu          sync.Mutex
+	rabbitmqURL string
+	queueName   string
+	conn        *amqp.Connection
+	channel     *amqp.Channel
 
 	embedder  file.Embedder
 	vectorDB  file.VectorDB
@@ -32,7 +31,7 @@ type EmbeddingConsumer struct {
 	llm       file.LLM
 }
 
-// NewEmbeddingConsumer creates an EmbeddingConsumer connected to RabbitMQ.
+// NewEmbeddingConsumer creates an EmbeddingConsumer.
 // Returns nil (no error) when RabbitMQ is disabled — callers should check for nil.
 func NewEmbeddingConsumer(
 	embedder file.Embedder,
@@ -48,82 +47,125 @@ func NewEmbeddingConsumer(
 
 	queueName := viper.GetString("rabbitmq.embedding_queue")
 	rabbitmqURL := viper.GetString("rabbitmq.url")
-	slog.Info("Connecting to RabbitMQ (embedding consumer)", "url", rabbitmqURL)
 
-	conn, err := amqp.Dial(rabbitmqURL)
-	if err != nil {
-		slog.Error("failed to connect to RabbitMQ for embedding consumer", "error", err)
-		return nil, err
+	return &EmbeddingConsumer{
+		rabbitmqURL: rabbitmqURL,
+		queueName:   queueName,
+		embedder:    embedder,
+		vectorDB:    vectorDB,
+		storage:     storage,
+		publisher:   publisher,
+		llm:         llm,
+	}, nil
+}
+
+func (c *EmbeddingConsumer) getChannel() (*amqp.Channel, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.channel != nil {
+		return c.channel, nil
 	}
 
-	channel, err := conn.Channel()
+	if c.conn == nil || c.conn.IsClosed() {
+		slog.Info("Embedding consumer connecting to RabbitMQ", "url", c.rabbitmqURL)
+		conn, err := amqp.Dial(c.rabbitmqURL)
+		if err != nil {
+			return nil, err
+		}
+		c.conn = conn
+	}
+
+	ch, err := c.conn.Channel()
 	if err != nil {
-		_ = conn.Close()
-		slog.Error("failed to open channel for embedding consumer", "error", err)
 		return nil, err
 	}
 
 	// Declare same durable queue (idempotent)
-	if _, err = channel.QueueDeclare(queueName, true, false, false, false, nil); err != nil {
-		_ = channel.Close()
-		_ = conn.Close()
-		slog.Error("failed to declare embedding queue in consumer", "queue", queueName, "error", err)
+	if _, err = ch.QueueDeclare(c.queueName, true, false, false, false, nil); err != nil {
+		_ = ch.Close()
 		return nil, err
 	}
 
 	// Fair dispatch: don't send a new job until consumer has ACK'd the previous one
-	if err = channel.Qos(1, 0, false); err != nil {
-		_ = channel.Close()
-		_ = conn.Close()
-		slog.Error("failed to set QoS for embedding consumer", "error", err)
+	if err = ch.Qos(1, 0, false); err != nil {
+		_ = ch.Close()
 		return nil, err
 	}
 
-	slog.Info("RabbitMQ embedding consumer initialized", "queue", queueName)
+	c.channel = ch
+	return c.channel, nil
+}
 
-	return &EmbeddingConsumer{
-		conn:      conn,
-		channel:   channel,
-		queueName: queueName,
-		embedder:  embedder,
-		vectorDB:  vectorDB,
-		storage:   storage,
-		publisher: publisher,
-		llm:       llm,
-	}, nil
+func (c *EmbeddingConsumer) resetChannel() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.channel != nil {
+		_ = c.channel.Close()
+		c.channel = nil
+	}
+	if c.conn != nil {
+		_ = c.conn.Close()
+		c.conn = nil
+	}
 }
 
 // Start begins consuming messages from the work queue.
 // It blocks until ctx is cancelled; call it in a goroutine.
 func (c *EmbeddingConsumer) Start(ctx context.Context) {
-	c.mu.Lock()
-	ch := c.channel
-	c.mu.Unlock()
-
-	msgs, err := ch.Consume(
-		c.queueName,
-		"",    // consumer tag — auto-generated
-		false, // auto-ack: we ack manually after processing
-		false, // exclusive
-		false, // no-local
-		false, // no-wait
-		nil,
-	)
-	if err != nil {
-		slog.Error("failed to start consuming embedding queue", "queue", c.queueName, "error", err)
-		return
-	}
-
-	slog.Info("Embedding consumer started", "queue", c.queueName)
-
 	for {
 		select {
 		case <-ctx.Done():
 			slog.Info("Embedding consumer stopping (context cancelled)")
 			return
+		default:
+		}
+
+		ch, err := c.getChannel()
+		if err != nil {
+			slog.Error("embedding consumer: failed to establish connection/channel, retrying...", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+				continue
+			}
+		}
+
+		msgs, err := ch.Consume(
+			c.queueName,
+			"",    // consumer tag — auto-generated
+			false, // auto-ack: we ack manually after processing
+			false, // exclusive
+			false, // no-local
+			false, // no-wait
+			nil,
+		)
+		if err != nil {
+			slog.Error("embedding consumer: failed to start consuming, resetting channel...", "error", err)
+			c.resetChannel()
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+				continue
+			}
+		}
+
+		slog.Info("Embedding consumer started/resumed", "queue", c.queueName)
+		c.consume(ctx, msgs)
+	}
+}
+
+func (c *EmbeddingConsumer) consume(ctx context.Context, msgs <-chan amqp.Delivery) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
 		case d, ok := <-msgs:
 			if !ok {
-				slog.Warn("Embedding consumer channel closed, stopping")
+				slog.Warn("Embedding consumer channel closed, reconnecting...")
+				c.resetChannel()
 				return
 			}
 			c.handle(ctx, d)
@@ -163,26 +205,35 @@ func (c *EmbeddingConsumer) handle(ctx context.Context, d amqp.Delivery) {
 
 	slog.Info("embedding consumer: processing job", "job_id", job.JobID, "file_id", job.FileID)
 
-	c.publisher.PublishEvent(ctx, "embedding.started", job.UserID, map[string]interface{}{
+	_ = c.publisher.PublishEvent(ctx, "embedding.started", job.UserID, map[string]interface{}{
 		"job_id":  job.JobID,
 		"file_id": job.FileID,
 	})
 
-	var processErr error
+	var (
+		skipped    bool
+		processErr error
+	)
 
 	if job.IsCopy {
 		processErr = c.handleCopy(ctx, job)
 	} else {
-		processErr = c.handleEmbed(ctx, job)
+		skipped, processErr = c.handleEmbed(ctx, job)
 	}
 
 	if processErr != nil {
 		slog.Error("embedding consumer: job failed", "job_id", job.JobID, "error", processErr)
-		c.publisher.PublishEvent(ctx, "embedding.failed", job.UserID, map[string]interface{}{
+		if err := c.publisher.PublishEvent(ctx, "embedding.failed", job.UserID, map[string]interface{}{
 			"job_id":  job.JobID,
 			"file_id": job.FileID,
 			"error":   processErr.Error(),
-		})
+		}); err != nil {
+			slog.Error("embedding consumer: failed to publish failure status", "job_id", job.JobID, "error", err)
+			if nackErr := d.Nack(false, true); nackErr != nil {
+				slog.Error("embedding consumer: failed to Nack job after status publish failure", "job_id", job.JobID, "error", nackErr)
+			}
+			return
+		}
 		// Nack with requeue if not already redelivered to handle transient errors
 		if nackErr := d.Nack(false, !d.Redelivered); nackErr != nil {
 			slog.Error("embedding consumer: failed to Nack failed job", "job_id", job.JobID, "error", nackErr)
@@ -190,10 +241,34 @@ func (c *EmbeddingConsumer) handle(ctx context.Context, d amqp.Delivery) {
 		return
 	}
 
-	c.publisher.PublishEvent(ctx, "embedding.completed", job.UserID, map[string]interface{}{
+	if skipped {
+		if err := c.publisher.PublishEvent(ctx, "embedding.skipped", job.UserID, map[string]interface{}{
+			"job_id":  job.JobID,
+			"file_id": job.FileID,
+			"reason":  "no extractable text",
+		}); err != nil {
+			slog.Error("embedding consumer: failed to publish skipped status", "job_id", job.JobID, "error", err)
+			if nackErr := d.Nack(false, true); nackErr != nil {
+				slog.Error("embedding consumer: failed to Nack skipped job", "job_id", job.JobID, "error", nackErr)
+			}
+			return
+		}
+		if ackErr := d.Ack(false); ackErr != nil {
+			slog.Error("embedding consumer: failed to Ack skipped job", "job_id", job.JobID, "error", ackErr)
+		}
+		return
+	}
+
+	if err := c.publisher.PublishEvent(ctx, "embedding.completed", job.UserID, map[string]interface{}{
 		"job_id":  job.JobID,
 		"file_id": job.FileID,
-	})
+	}); err != nil {
+		slog.Error("embedding consumer: failed to publish completion status", "job_id", job.JobID, "error", err)
+		if nackErr := d.Nack(false, true); nackErr != nil {
+			slog.Error("embedding consumer: failed to Nack job after status publish failure", "job_id", job.JobID, "error", nackErr)
+		}
+		return
+	}
 
 	if ackErr := d.Ack(false); ackErr != nil {
 		slog.Error("embedding consumer: failed to Ack completed job", "job_id", job.JobID, "error", ackErr)
@@ -207,86 +282,34 @@ func (c *EmbeddingConsumer) handleCopy(ctx context.Context, job contract.Embeddi
 }
 
 // handleEmbed extracts text, generates embedding, and inserts into vector DB.
-func (c *EmbeddingConsumer) handleEmbed(ctx context.Context, job contract.EmbeddingJob) error {
+func (c *EmbeddingConsumer) handleEmbed(ctx context.Context, job contract.EmbeddingJob) (bool, error) {
 	// Read file content from storage
 	data, err := c.storage.Read(ctx, job.StorageKey)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	// Extract text
-	text, err := extractor.ExtractText(data, job.Filename)
+	// Extract text with OCR fallback.
+	text, err := embedding.ExtractTextWithOCR(ctx, data, job.Filename, c.llm)
 	if err != nil {
-		// Text extraction failure is a system-level error (e.g. corrupted file, unsupported format).
-		// Return the error so handle() publishes embedding.failed as an alert.
-		return fmt.Errorf("text extraction failed: %w", err)
-	}
-	if text == "" && c.llm != nil {
-		lowerFilename := strings.ToLower(job.Filename)
-		if strings.HasSuffix(lowerFilename, ".pdf") {
-			slog.Info("embedding consumer: extracted text is empty, trying OCR on PDF pages", "job_id", job.JobID, "filename", job.Filename)
-			ocrText, ocrErr := extractor.PerformOCRForPDF(ctx, data, c.llm)
-			if ocrErr == nil && ocrText != "" {
-				text = ocrText
-				slog.Info("embedding consumer: successfully extracted text via PDF OCR", "job_id", job.JobID, "filename", job.Filename, "text_len", len(text))
-			} else if ocrErr != nil {
-				slog.Warn("embedding consumer: PDF OCR fallback failed", "job_id", job.JobID, "filename", job.Filename, "error", ocrErr)
-			}
-		} else if strings.HasSuffix(lowerFilename, ".pptx") || strings.HasSuffix(lowerFilename, ".ppt") {
-			slog.Info("embedding consumer: extracted text is empty, trying OCR on PPTX embedded images", "job_id", job.JobID, "filename", job.Filename)
-			ocrText, ocrErr := extractor.PerformOCRForPPTX(ctx, data, c.llm)
-			if ocrErr == nil && ocrText != "" {
-				text = ocrText
-				slog.Info("embedding consumer: successfully extracted text via PPTX OCR", "job_id", job.JobID, "filename", job.Filename, "text_len", len(text))
-			} else if ocrErr != nil {
-				slog.Warn("embedding consumer: PPTX OCR fallback failed", "job_id", job.JobID, "filename", job.Filename, "error", ocrErr)
-			}
-		}
+		return false, err
 	}
 	if text == "" {
 		slog.Info("embedding consumer: no text extracted, skipping embedding", "job_id", job.JobID)
-		c.publisher.PublishEvent(ctx, "embedding.skipped", job.UserID, map[string]interface{}{
-			"job_id":  job.JobID,
-			"file_id": job.FileID,
-			"reason":  "no extractable text",
-		})
-		return nil
+		return true, nil
 	}
 
-	c.publisher.PublishEvent(ctx, "embedding.text_extracted", job.UserID, map[string]interface{}{
+	_ = c.publisher.PublishEvent(ctx, "embedding.text_extracted", job.UserID, map[string]interface{}{
 		"job_id":      job.JobID,
 		"file_id":     job.FileID,
 		"text_length": len(text),
 	})
 
-	// Generate embedding
-	chunkSize := viper.GetInt("chunk.size")
-	if chunkSize <= 0 {
-		chunkSize = 1000
-	}
-	chunkOverlap := viper.GetInt("chunk.overlap")
-	if chunkOverlap < 0 {
-		chunkOverlap = 200
+	// Generate embedding and insert vectors.
+	if err := embedding.EmbedTextChunks(ctx, job.FileID, text, c.embedder, c.vectorDB); err != nil {
+		slog.Error("embedding failed (async)", "job_id", job.JobID, "file_id", job.FileID, "error", err)
+		return false, err
 	}
 
-	chunks := extractor.SplitText(text, chunkSize, chunkOverlap)
-	for i, chunk := range chunks {
-		embeddingVal, err := c.embedder.Embed(ctx, chunk)
-		if err != nil {
-			slog.Error("embedding provider error (async)", "job_id", job.JobID, "file_id", job.FileID, "chunk_index", i, "error", err)
-			return err
-		}
-
-		// Insert into vector DB — use a background context so the job finishes
-		// even if the original request context has been cancelled.
-		insertCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		insertErr := c.vectorDB.Insert(insertCtx, job.FileID, i, chunk, embeddingVal)
-		cancel()
-
-		if insertErr != nil {
-			return insertErr
-		}
-	}
-
-	return nil
+	return false, nil
 }

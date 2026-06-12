@@ -1,22 +1,88 @@
 basePath: /api/v1
 definitions:
+  contract.DeleteResponse:
+    properties:
+      message:
+        type: string
+      physical_deleted:
+        type: boolean
+    type: object
+  contract.ErrorResponse:
+    properties:
+      error:
+        type: string
+    type: object
+  contract.FileConflictResponse:
+    properties:
+      conflicting_hash:
+        type: string
+      conflicting_id:
+        type: string
+      error:
+        type: string
+    type: object
+  contract.FileListResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/contract.FileResponse'
+        type: array
+      page:
+        type: integer
+      page_size:
+        type: integer
+      total:
+        type: integer
+      total_pages:
+        type: integer
+    type: object
+  contract.FileMetadataResponse:
+    properties:
+      database_record:
+        $ref: '#/definitions/contract.FileResponse'
+      physical_storage:
+        $ref: '#/definitions/contract.StorageMetadataResponse'
+    type: object
   contract.FileResponse:
     properties:
+      author_id:
+        type: string
       content_type:
         type: string
       created_at:
         type: string
+      description:
+        type: string
+      embedding_status:
+        type: string
       filename:
         type: string
+      group_ids:
+        items:
+          type: string
+        type: array
       hash:
         type: string
       id:
         type: string
-      owner_id:
-        type: string
       size:
         type: integer
+      tags:
+        items:
+          type: string
+        type: array
       updated_at:
+        type: string
+    type: object
+  contract.MeResponse:
+    properties:
+      created_at:
+        type: string
+      id:
+        type: string
+      updated_at:
+        type: string
+      username:
         type: string
     type: object
   contract.RegisterRequest:
@@ -38,21 +104,42 @@ definitions:
       username:
         type: string
     type: object
+  contract.SearchListResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/contract.SearchResponseItem'
+        type: array
+      nlp_expansion:
+        type: boolean
+    type: object
   contract.SearchResponseItem:
     properties:
+      author_id:
+        type: string
+      chunk_id:
+        type: string
+      chunk_text:
+        type: string
       content_type:
         type: string
       created_at:
         type: string
+      description:
+        type: string
       distance:
         type: number
+      embedding_status:
+        type: string
       filename:
         type: string
+      group_ids:
+        items:
+          type: string
+        type: array
       hash:
         type: string
       id:
-        type: string
-      owner_id:
         type: string
       score:
         type: number
@@ -60,7 +147,47 @@ definitions:
         type: integer
       source_query:
         type: string
+      tags:
+        items:
+          type: string
+        type: array
       updated_at:
+        type: string
+    type: object
+  contract.StorageMetadataResponse:
+    properties:
+      content_length:
+        type: integer
+      error:
+        type: string
+      last_modified:
+        type: string
+    type: object
+  contract.UpdateFileMetadataRequest:
+    properties:
+      description:
+        type: string
+      filename:
+        type: string
+      group_ids:
+        items:
+          type: string
+        type: array
+      tags:
+        items:
+          type: string
+        type: array
+    type: object
+  contract.UpdateMeRequest:
+    properties:
+      password:
+        type: string
+      username:
+        type: string
+    type: object
+  http.StreamResponse:
+    properties:
+      message:
         type: string
     type: object
 info:
@@ -69,31 +196,58 @@ info:
   title: Armi File Manager API
   version: "1.0"
 paths:
+  /events:
+    get:
+      description: Streams processing progress and status updates via SSE.
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE Connection established
+          schema:
+            $ref: '#/definitions/http.StreamResponse'
+      security:
+      - BasicAuth: []
+      - BearerAuth: []
+      summary: Connect to event bus
+      tags:
+      - events
   /files:
     get:
-      description: Retrieves list of all metadata records of files owned by the authenticated
-        user.
+      description: Retrieves a paginated list of file metadata records accessible
+        to the authenticated user.
+      parameters:
+      - description: Filter by tag
+        in: query
+        name: tag
+        type: string
+      - description: Page number (starts from 1)
+        in: query
+        name: page
+        type: integer
+      - description: Number of items per page (1-100)
+        in: query
+        name: page_size
+        type: integer
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            items:
-              $ref: '#/definitions/contract.FileResponse'
-            type: array
+            $ref: '#/definitions/contract.FileListResponse'
+        "400":
+          description: Invalid pagination parameters
+          schema:
+            $ref: '#/definitions/contract.ErrorResponse'
         "401":
           description: Unauthorized
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "500":
           description: Database error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
       security:
       - BasicAuth: []
       summary: List user files
@@ -120,27 +274,19 @@ paths:
         "400":
           description: Missing file or invalid request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "401":
           description: Unauthorized
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "409":
           description: File conflict (duplicate filename or hash)
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.FileConflictResponse'
         "500":
           description: Internal server error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
       security:
       - BasicAuth: []
       summary: Upload a document file
@@ -162,32 +308,23 @@ paths:
         "200":
           description: Message and physical_deleted status
           schema:
-            additionalProperties: true
-            type: object
+            $ref: '#/definitions/contract.DeleteResponse'
         "401":
           description: Unauthorized
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "403":
           description: Forbidden (access denied)
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "404":
           description: File not found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "500":
           description: Delete error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
       security:
       - BasicAuth: []
       summary: Delete a file
@@ -211,27 +348,19 @@ paths:
         "401":
           description: Unauthorized
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "403":
           description: Forbidden (access denied)
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "404":
           description: File not found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "500":
           description: Download error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
       security:
       - BasicAuth: []
       summary: Download a file
@@ -253,35 +382,75 @@ paths:
         "200":
           description: File metadata wrapper (database_record and physical_storage)
           schema:
-            additionalProperties: true
-            type: object
+            $ref: '#/definitions/contract.FileMetadataResponse'
         "401":
           description: Unauthorized
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "403":
           description: Forbidden (access denied)
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "404":
           description: File not found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "500":
           description: Metadata error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
       security:
       - BasicAuth: []
       summary: Get file metadata
+      tags:
+      - files
+    patch:
+      consumes:
+      - application/json
+      description: Updates file metadata fields such as filename and tags for the
+        specified file.
+      parameters:
+      - description: File ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Metadata updates
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/contract.UpdateFileMetadataRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/contract.FileResponse'
+        "400":
+          description: Invalid request or metadata update payload
+          schema:
+            $ref: '#/definitions/contract.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/contract.ErrorResponse'
+        "403":
+          description: Forbidden (access denied)
+          schema:
+            $ref: '#/definitions/contract.ErrorResponse'
+        "404":
+          description: File not found
+          schema:
+            $ref: '#/definitions/contract.ErrorResponse'
+        "500":
+          description: Update metadata error
+          schema:
+            $ref: '#/definitions/contract.ErrorResponse'
+      security:
+      - BasicAuth: []
+      summary: Update file metadata
       tags:
       - files
   /files/search:
@@ -312,78 +481,129 @@ paths:
         "200":
           description: OK
           schema:
-            items:
-              $ref: '#/definitions/contract.SearchResponseItem'
-            type: array
+            $ref: '#/definitions/contract.SearchListResponse'
         "400":
           description: Missing query parameter 'q'
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "401":
           description: Unauthorized
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
         "500":
           description: Search failed
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
       security:
       - BasicAuth: []
       summary: Search files semantically
       tags:
       - files
   /mcp:
-    get:
-      description: Establishes a Streamable HTTP (SSE) connection channel.
+    delete:
+      consumes:
+      - application/json
+      description: Handles MCP Streamable HTTP requests over a single /mcp endpoint.
       produces:
-      - text/event-stream
+      - application/json
       responses:
         "200":
-          description: SSE Connection established
+          description: MCP response
           schema:
-            type: string
+            $ref: '#/definitions/http.StreamResponse'
       security:
       - BasicAuth: []
-      summary: Connect to MCP Server (SSE)
+      summary: MCP Server (Streamable HTTP)
       tags:
       - mcp
-  /mcp/message:
+    get:
+      consumes:
+      - application/json
+      description: Handles MCP Streamable HTTP requests over a single /mcp endpoint.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: MCP response
+          schema:
+            $ref: '#/definitions/http.StreamResponse'
+      security:
+      - BasicAuth: []
+      summary: MCP Server (Streamable HTTP)
+      tags:
+      - mcp
     post:
       consumes:
       - application/json
-      description: Sends JSON-RPC 2.0 request messages (like initialize, tools/list,
-        tools/call).
+      description: Handles MCP Streamable HTTP requests over a single /mcp endpoint.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: MCP response
+          schema:
+            $ref: '#/definitions/http.StreamResponse'
+      security:
+      - BasicAuth: []
+      summary: MCP Server (Streamable HTTP)
+      tags:
+      - mcp
+  /users/me:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/contract.MeResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/contract.ErrorResponse'
+        "404":
+          description: User not found
+          schema:
+            $ref: '#/definitions/contract.ErrorResponse'
+      security:
+      - BasicAuth: []
+      summary: Get current user profile
+      tags:
+      - users
+    patch:
+      consumes:
+      - application/json
       parameters:
-      - description: Session ID (SSE Client)
-        in: query
-        name: sessionId
-        required: true
-        type: string
-      - description: JSON-RPC Request
+      - description: Current user profile updates
         in: body
         name: request
         required: true
         schema:
-          type: string
+          $ref: '#/definitions/contract.UpdateMeRequest'
       produces:
       - application/json
       responses:
         "200":
-          description: Message accepted
+          description: OK
           schema:
-            type: string
+            $ref: '#/definitions/contract.MeResponse'
+        "400":
+          description: Invalid input
+          schema:
+            $ref: '#/definitions/contract.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/contract.ErrorResponse'
+        "500":
+          description: Update failed
+          schema:
+            $ref: '#/definitions/contract.ErrorResponse'
       security:
       - BasicAuth: []
-      summary: Post message to MCP Server
+      summary: Update current user profile
       tags:
-      - mcp
-  /users/register:
+      - users
     post:
       consumes:
       - application/json
@@ -405,13 +625,15 @@ paths:
         "400":
           description: Invalid input or registration error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/contract.ErrorResponse'
       summary: Register a new user
       tags:
       - users
 securityDefinitions:
   BasicAuth:
     type: basic
+  BearerAuth:
+    in: header
+    name: Authorization
+    type: apiKey
 swagger: "2.0"

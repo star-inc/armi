@@ -10,7 +10,7 @@ import (
 	"github.com/apache/opendal-go-services/memory"
 	opendal "github.com/apache/opendal/bindings/go"
 	"github.com/spf13/viper"
-	"github.com/supersonictw/armi/pkgs/file"
+	"github.com/star-inc/armi/pkgs/file"
 )
 
 // OpenDALStorage implements file.Storage interface using Apache OpenDAL.

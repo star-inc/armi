@@ -73,6 +73,17 @@ func ParseAlgorithm(s string) (Algorithm, error) {
 // Sub contains the armi user ID.
 type Claims struct {
 	jwt.RegisteredClaims
+	Scope string `json:"scp,omitempty"`
+}
+
+// HasScope reports whether scp contains the exact scope token.
+func (c *Claims) HasScope(scope string) bool {
+	for _, s := range strings.Fields(c.Scope) {
+		if s == scope {
+			return true
+		}
+	}
+	return false
 }
 
 // Config carries all parameters needed to build a Verifier.

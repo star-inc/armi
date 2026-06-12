@@ -12,13 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/star-inc/armi/internal/infrastructure/database"
+	"github.com/star-inc/armi/internal/infrastructure/jwtauth"
+	"github.com/star-inc/armi/internal/infrastructure/storage"
+	"github.com/star-inc/armi/internal/infrastructure/vector"
+	"github.com/star-inc/armi/internal/usecase"
+	"github.com/star-inc/armi/pkgs/contract"
 	"github.com/spf13/viper"
-	"github.com/supersonictw/armi/internal/infrastructure/database"
-	"github.com/supersonictw/armi/internal/infrastructure/jwtauth"
-	"github.com/supersonictw/armi/internal/infrastructure/storage"
-	"github.com/supersonictw/armi/internal/infrastructure/vector"
-	"github.com/supersonictw/armi/internal/usecase"
-	"github.com/supersonictw/armi/pkgs/contract"
 )
 
 // MockEmbedder implements file.Embedder for testing.
@@ -33,8 +34,9 @@ func (m *MockEmbedder) Embed(ctx context.Context, text string) ([]float32, error
 // MockPublisher implements file.EventPublisher for testing.
 type MockPublisher struct{}
 
-func (m *MockPublisher) PublishEvent(ctx context.Context, eventType string, userID string, payload map[string]interface{}) {
+func (m *MockPublisher) PublishEvent(ctx context.Context, eventType string, userID string, payload map[string]interface{}) error {
 	// Do nothing in tests
+	return nil
 }
 
 func (m *MockPublisher) Close() error {
@@ -90,7 +92,7 @@ func setupTestEnv(t *testing.T) *Server {
 	userUsecase := usecase.NewUserUsecase(userRepo, publisher)
 	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher, nil)
 
-	return NewServer(userUsecase, fileUsecase, publisher, jwtauth.AuthSchemeBasic, nil)
+	return NewServer(userUsecase, fileUsecase, publisher, jwtauth.AuthSchemeBasic, nil, NewEventsHub())
 }
 
 func TestHandlersFlow(t *testing.T) {
@@ -104,7 +106,7 @@ func TestHandlersFlow(t *testing.T) {
 	regBytes, _ := json.Marshal(regPayload)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest(http.MethodPost, "/api/v1/users/register", bytes.NewReader(regBytes))
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/users/me", bytes.NewReader(regBytes))
 	req.Header.Set("Content-Type", "application/json")
 	server.Engine.ServeHTTP(w, req)
 
@@ -118,6 +120,7 @@ func TestHandlersFlow(t *testing.T) {
 	if userID == "" {
 		t.Fatalf("Expected non-empty user ID in response")
 	}
+	_ = userID
 
 	// 2. Upload File (Requires BasicAuth)
 	body := &bytes.Buffer{}
@@ -125,6 +128,7 @@ func TestHandlersFlow(t *testing.T) {
 	part, _ := writer.CreateFormFile("file", "document.txt")
 	_, _ = part.Write([]byte("This is a simple text document content talking about Go programming and vectors."))
 	_ = writer.WriteField("tags", "golang,test")
+	_ = writer.WriteField("description", "initial description")
 	_ = writer.Close()
 
 	w = httptest.NewRecorder()
@@ -147,6 +151,9 @@ func TestHandlersFlow(t *testing.T) {
 	}
 	if len(fileRecord.Tags) != 2 || fileRecord.Tags[0] != "golang" || fileRecord.Tags[1] != "test" {
 		t.Fatalf("Expected tags ['golang', 'test'], got %v", fileRecord.Tags)
+	}
+	if fileRecord.Description != "initial description" {
+		t.Fatalf("Expected description 'initial description', got '%s'", fileRecord.Description)
 	}
 
 	// 2.2 Upload Second File (Requires BasicAuth)
@@ -180,10 +187,13 @@ func TestHandlersFlow(t *testing.T) {
 		t.Fatalf("File listing failed: status=%d response=%s", w.Code, w.Body.String())
 	}
 
-	var fileList []contract.FileResponse
+	var fileList contract.FileListResponse
 	_ = json.Unmarshal(w.Body.Bytes(), &fileList)
-	if len(fileList) != 2 {
-		t.Fatalf("Expected file list size 2, got %d", len(fileList))
+	if len(fileList.Items) != 2 {
+		t.Fatalf("Expected file list size 2, got %d", len(fileList.Items))
+	}
+	if fileList.Total != 2 || fileList.Page != 1 || fileList.PageSize != 20 || fileList.TotalPages != 1 {
+		t.Fatalf("Unexpected pagination metadata: %+v", fileList)
 	}
 
 	// 3.1 List Files - Filter by tag 'golang'
@@ -193,11 +203,11 @@ func TestHandlersFlow(t *testing.T) {
 	server.Engine.ServeHTTP(w, req)
 
 	_ = json.Unmarshal(w.Body.Bytes(), &fileList)
-	if len(fileList) != 1 {
-		t.Fatalf("Expected 1 file with tag 'golang', got %d", len(fileList))
+	if len(fileList.Items) != 1 {
+		t.Fatalf("Expected 1 file with tag 'golang', got %d", len(fileList.Items))
 	}
-	if fileList[0].ID != fileRecord.ID {
-		t.Fatalf("Expected list item ID '%s', got '%s'", fileRecord.ID, fileList[0].ID)
+	if fileList.Items[0].ID != fileRecord.ID {
+		t.Fatalf("Expected list item ID '%s', got '%s'", fileRecord.ID, fileList.Items[0].ID)
 	}
 
 	// 3.2 List Files - Filter by tag 'python'
@@ -207,11 +217,11 @@ func TestHandlersFlow(t *testing.T) {
 	server.Engine.ServeHTTP(w, req)
 
 	_ = json.Unmarshal(w.Body.Bytes(), &fileList)
-	if len(fileList) != 1 {
-		t.Fatalf("Expected 1 file with tag 'python', got %d", len(fileList))
+	if len(fileList.Items) != 1 {
+		t.Fatalf("Expected 1 file with tag 'python', got %d", len(fileList.Items))
 	}
-	if fileList[0].ID != fileRecord2.ID {
-		t.Fatalf("Expected list item ID '%s', got '%s'", fileRecord2.ID, fileList[0].ID)
+	if fileList.Items[0].ID != fileRecord2.ID {
+		t.Fatalf("Expected list item ID '%s', got '%s'", fileRecord2.ID, fileList.Items[0].ID)
 	}
 
 	// 3.3 List Files - Filter by non-existent tag 'ruby'
@@ -253,6 +263,43 @@ func TestHandlersFlow(t *testing.T) {
 		t.Fatalf("Metadata fetch failed: status=%d response=%s", w.Code, w.Body.String())
 	}
 
+	// 5.1 Patch Metadata File
+	patchPayload := map[string]interface{}{
+		"filename":    "document-renamed.txt",
+		"description": "renamed description",
+		"tags":        []string{"updated", "golang"},
+	}
+	patchBytes, _ := json.Marshal(patchPayload)
+
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodPatch, "/api/v1/files/"+fileRecord.ID+"/metadata", bytes.NewReader(patchBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth("testuser", "securepassword")
+	server.Engine.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Metadata patch failed: status=%d response=%s", w.Code, w.Body.String())
+	}
+
+	var patchedRecord contract.FileResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &patchedRecord)
+	if patchedRecord.Filename != "document-renamed.txt" {
+		t.Fatalf("Expected patched filename 'document-renamed.txt', got '%s'", patchedRecord.Filename)
+	}
+	if patchedRecord.Description != "renamed description" {
+		t.Fatalf("Expected patched description 'renamed description', got '%s'", patchedRecord.Description)
+	}
+	if len(patchedRecord.Tags) != 2 {
+		t.Fatalf("Expected patched tags size 2, got %v", patchedRecord.Tags)
+	}
+	tagSet := map[string]bool{}
+	for _, tg := range patchedRecord.Tags {
+		tagSet[tg] = true
+	}
+	if !tagSet["updated"] || !tagSet["golang"] {
+		t.Fatalf("Expected patched tags to contain 'updated' and 'golang', got %v", patchedRecord.Tags)
+	}
+
 	// 6. Vector Search
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodGet, "/api/v1/files/search?q=programming&nlp_expansion=true&expansion_num=2", nil)
@@ -263,10 +310,14 @@ func TestHandlersFlow(t *testing.T) {
 		t.Fatalf("Vector search failed: status=%d response=%s", w.Code, w.Body.String())
 	}
 
-	var searchResults []contract.SearchResponseItem
-	_ = json.Unmarshal(w.Body.Bytes(), &searchResults)
+	var searchResponse contract.SearchListResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &searchResponse)
+	searchResults := searchResponse.Items
 	if len(searchResults) != 1 {
 		t.Fatalf("Expected search result size 1, got %d", len(searchResults))
+	}
+	if searchResponse.NLPExpansion {
+		t.Fatalf("Expected NLP expansion to be false since global config is disabled")
 	}
 	if searchResults[0].ID != fileRecord.ID {
 		t.Fatalf("Expected search match ID '%s', got '%s'", fileRecord.ID, searchResults[0].ID)
@@ -295,8 +346,8 @@ func TestHandlersFlow(t *testing.T) {
 	server.Engine.ServeHTTP(w, req)
 
 	_ = json.Unmarshal(w.Body.Bytes(), &fileList)
-	if len(fileList) != 0 {
-		t.Fatalf("Expected file list size 0 after deletion, got %d", len(fileList))
+	if len(fileList.Items) != 0 {
+		t.Fatalf("Expected file list size 0 after deletion, got %d", len(fileList.Items))
 	}
 }
 
@@ -310,85 +361,222 @@ func TestMCPFlow(t *testing.T) {
 	}
 	regBytes, _ := json.Marshal(regPayload)
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest(http.MethodPost, "/api/v1/users/register", bytes.NewReader(regBytes))
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/users/me", bytes.NewReader(regBytes))
 	req.Header.Set("Content-Type", "application/json")
 	server.Engine.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("Registration failed for mcpuser: %s", w.Body.String())
 	}
 
-	// 2. Open background SSE Connection
-	sseReq, _ := http.NewRequest(http.MethodGet, "/api/v1/mcp", nil)
-	sseReq.SetBasicAuth("mcpuser", "securepassword")
-	sseRec := httptest.NewRecorder()
+	// 2. Initialize Streamable HTTP session
+	initReqBody := mcp.JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      mcp.NewRequestId(1),
+		Request: mcp.Request{
+			Method: string(mcp.MethodInitialize),
+		},
+		Params: mcp.InitializeParams{
+			ProtocolVersion: "2025-03-26",
+			Capabilities:    mcp.ClientCapabilities{},
+			ClientInfo: mcp.Implementation{
+				Name:    "armi-test-client",
+				Version: "1.0.0",
+			},
+		},
+	}
+	initBytes, _ := json.Marshal(initReqBody)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	sseReq = sseReq.WithContext(ctx)
+	wInit := httptest.NewRecorder()
+	initReq, _ := http.NewRequest(http.MethodPost, "/api/v1/mcp", bytes.NewReader(initBytes))
+	initReq.Header.Set("Content-Type", "application/json")
+	initReq.SetBasicAuth("mcpuser", "securepassword")
+	server.Engine.ServeHTTP(wInit, initReq)
 
-	go func() {
-		server.Engine.ServeHTTP(sseRec, sseReq)
-	}()
-
-	// Wait for SSE server to write endpoint event
-	var bodyStr string
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		bodyStr = sseRec.Body.String()
-		if strings.Contains(bodyStr, "event: endpoint") {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
+	if wInit.Code != http.StatusOK {
+		t.Fatalf("Initialize failed: status=%d response=%s", wInit.Code, wInit.Body.String())
 	}
 
-	if !strings.Contains(bodyStr, "event: endpoint") {
-		cancel()
-		t.Fatalf("Expected endpoint event in SSE stream, got: %s", bodyStr)
+	sessionID := wInit.Header().Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatalf("Expected Mcp-Session-Id header in initialize response, got headers=%v", wInit.Header())
+	}
+	if !strings.Contains(wInit.Body.String(), "\"protocolVersion\"") {
+		t.Fatalf("Expected initialize response payload, got: %s", wInit.Body.String())
 	}
 
-	// Extract sessionId
-	idx := strings.Index(bodyStr, "sessionId=")
-	if idx == -1 {
-		cancel()
-		t.Fatalf("Could not find sessionId in body: %s", bodyStr)
-	}
-	sessionID := strings.TrimSpace(bodyStr[idx+len("sessionId="):])
-	sessionID = strings.Split(sessionID, "\n")[0]
-	sessionID = strings.TrimRight(sessionID, "\r")
-
-	// 3. Post tools/list message
+	// 3. Post tools/list request over the same /mcp endpoint
 	listReqBody := map[string]interface{}{
 		"jsonrpc": "2.0",
-		"id":      1,
+		"id":      2,
 		"method":  "tools/list",
 	}
 	listBytes, _ := json.Marshal(listReqBody)
 
 	wMsg := httptest.NewRecorder()
-	msgReq, _ := http.NewRequest(http.MethodPost, "/api/v1/mcp/message?sessionId="+sessionID, bytes.NewReader(listBytes))
+	msgReq, _ := http.NewRequest(http.MethodPost, "/api/v1/mcp", bytes.NewReader(listBytes))
 	msgReq.Header.Set("Content-Type", "application/json")
+	msgReq.Header.Set("Mcp-Session-Id", sessionID)
 	msgReq.SetBasicAuth("mcpuser", "securepassword")
 	server.Engine.ServeHTTP(wMsg, msgReq)
 
-	if wMsg.Code != http.StatusAccepted && wMsg.Code != http.StatusOK {
-		cancel()
-		t.Fatalf("Expected message post accepted, got status %d: %s", wMsg.Code, wMsg.Body.String())
+	if wMsg.Code != http.StatusOK {
+		t.Fatalf("Expected tools/list to succeed, got status %d: %s", wMsg.Code, wMsg.Body.String())
+	}
+	if !strings.Contains(wMsg.Body.String(), "list_files") || !strings.Contains(wMsg.Body.String(), "search_files") || !strings.Contains(wMsg.Body.String(), "read_file") {
+		t.Fatalf("Expected tools in Streamable HTTP response, got: %s", wMsg.Body.String())
 	}
 
-	// Wait for server response via SSE channel
-	var finalBody string
-	deadline = time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		finalBody = sseRec.Body.String()
-		if strings.Contains(finalBody, "list_files") || strings.Contains(finalBody, "search_files") || strings.Contains(finalBody, "read_file") {
+	// 4. Terminate the session using DELETE /mcp
+	wDel := httptest.NewRecorder()
+	delReq, _ := http.NewRequest(http.MethodDelete, "/api/v1/mcp", nil)
+	delReq.Header.Set("Mcp-Session-Id", sessionID)
+	delReq.SetBasicAuth("mcpuser", "securepassword")
+	server.Engine.ServeHTTP(wDel, delReq)
+
+	if wDel.Code != http.StatusOK {
+		t.Fatalf("Expected session termination to succeed, got status %d: %s", wDel.Code, wDel.Body.String())
+	}
+}
+
+func TestRegisterDisabledWhenBearerOnly(t *testing.T) {
+	t.Setenv("GIN_MODE", "test")
+
+	viper.Set("db.driver", "sqlite")
+	viper.Set("db.sqlite.path", ":memory:")
+	viper.Set("storage.scheme", "memory")
+	viper.Set("vector.provider", "sqlite-vec")
+	viper.Set("rabbitmq.enabled", false)
+
+	db, err := database.InitDB()
+	if err != nil {
+		t.Fatalf("failed to init database: %v", err)
+	}
+
+	store, err := storage.NewOpenDALStorage()
+	if err != nil {
+		t.Fatalf("failed to init storage: %v", err)
+	}
+
+	embedder := &MockEmbedder{}
+	vectorDB, err := vector.NewVectorDB()
+	if err != nil {
+		t.Fatalf("failed to init vector db: %v", err)
+	}
+
+	publisher := &MockPublisher{}
+	llmService := &MockLLM{}
+
+	userRepo := database.NewGormUserRepository(db)
+	fileRepo := database.NewGormFileRepository(db)
+
+	userUsecase := usecase.NewUserUsecase(userRepo, publisher)
+	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher, nil)
+	server := NewServer(userUsecase, fileUsecase, publisher, jwtauth.AuthSchemeBearer, nil, NewEventsHub())
+
+	regPayload := map[string]string{
+		"username": "blocked-user",
+		"password": "securepassword",
+	}
+	regBytes, _ := json.Marshal(regPayload)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/users/me", bytes.NewReader(regBytes))
+	req.Header.Set("Content-Type", "application/json")
+	server.Engine.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("Expected register endpoint disabled in bearer-only mode, got status=%d response=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestEventsSSEStreamsMatchingUserEvents(t *testing.T) {
+	server := setupTestEnv(t)
+
+	regPayload := map[string]string{
+		"username": "stream-user",
+		"password": "securepassword",
+	}
+	regBytes, _ := json.Marshal(regPayload)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/users/me", bytes.NewReader(regBytes))
+	req.Header.Set("Content-Type", "application/json")
+	server.Engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Registration failed: status=%d response=%s", w.Code, w.Body.String())
+	}
+
+	var userJSON map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &userJSON)
+	userID := userJSON["id"].(string)
+	if userID == "" {
+		t.Fatalf("Expected non-empty user ID in response")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sseReq, _ := http.NewRequest(http.MethodGet, "/events", nil)
+	sseReq = sseReq.WithContext(ctx)
+	sseReq.SetBasicAuth("stream-user", "securepassword")
+
+	sseRec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.Engine.ServeHTTP(sseRec, sseReq)
+		close(done)
+	}()
+
+	for i := 0; i < 20; i++ {
+		if strings.Contains(sseRec.Body.String(), ": connected") {
 			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 	}
 
-	if !strings.Contains(finalBody, "list_files") || !strings.Contains(finalBody, "search_files") || !strings.Contains(finalBody, "read_file") {
-		cancel()
-		t.Fatalf("Expected tools in SSE body, got: %s", finalBody)
+	server.EventHub.Broadcast(contract.SystemEvent{
+		EventID:   "evt-1",
+		EventType: "embedding.started",
+		UserID:    userID,
+		Timestamp: time.Now().Format(time.RFC3339),
+		Payload: map[string]interface{}{
+			"file_id": "file-1",
+		},
+	})
+	server.EventHub.Broadcast(contract.SystemEvent{
+		EventID:   "evt-2",
+		EventType: "embedding.completed",
+		UserID:    "other-user",
+		Timestamp: time.Now().Format(time.RFC3339),
+		Payload: map[string]interface{}{
+			"file_id": "file-2",
+		},
+	})
+
+	for i := 0; i < 20; i++ {
+		body := sseRec.Body.String()
+		if strings.Contains(body, "event: embedding.started") {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 
 	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler did not exit after cancellation")
+	}
+
+	body := sseRec.Body.String()
+	if !strings.Contains(body, "event: embedding.started") {
+		t.Fatalf("Expected matching event in SSE body, got: %s", body)
+	}
+	if !strings.Contains(body, "\"file_id\":\"file-1\"") {
+		t.Fatalf("Expected event payload in SSE body, got: %s", body)
+	}
+	if strings.Contains(body, "other-user") || strings.Contains(body, "file-2") {
+		t.Fatalf("Expected SSE stream to filter other users, got: %s", body)
+	}
 }

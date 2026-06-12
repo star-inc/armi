@@ -8,6 +8,34 @@
     },
     "basePath": "/api/v1",
     "paths": {
+        "/events": {
+            "get": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    },
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Streams processing progress and status updates via SSE.",
+                "produces": [
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "events"
+                ],
+                "summary": "Connect to event bus",
+                "responses": {
+                    "200": {
+                        "description": "SSE Connection established",
+                        "schema": {
+                            "$ref": "#/definitions/http.StreamResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/files": {
             "get": {
                 "security": [
@@ -15,7 +43,7 @@
                         "BasicAuth": []
                     }
                 ],
-                "description": "Retrieves list of all metadata records of files owned by the authenticated user.",
+                "description": "Retrieves a paginated list of file metadata records accessible to the authenticated user.",
                 "produces": [
                     "application/json"
                 ],
@@ -23,32 +51,49 @@
                     "files"
                 ],
                 "summary": "List user files",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Filter by tag",
+                        "name": "tag",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page number (starts from 1)",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Number of items per page (1-100)",
+                        "name": "page_size",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/contract.FileResponse"
-                            }
+                            "$ref": "#/definitions/contract.FileListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid pagination parameters",
+                        "schema": {
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "401": {
                         "description": "Unauthorized",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Database error",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     }
                 }
@@ -89,37 +134,25 @@
                     "400": {
                         "description": "Missing file or invalid request",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "401": {
                         "description": "Unauthorized",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "409": {
                         "description": "File conflict (duplicate filename or hash)",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.FileConflictResponse"
                         }
                     },
                     "500": {
                         "description": "Internal server error",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     }
                 }
@@ -171,37 +204,25 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/contract.SearchResponseItem"
-                            }
+                            "$ref": "#/definitions/contract.SearchListResponse"
                         }
                     },
                     "400": {
                         "description": "Missing query parameter 'q'",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "401": {
                         "description": "Unauthorized",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Search failed",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     }
                 }
@@ -241,37 +262,25 @@
                     "401": {
                         "description": "Unauthorized",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "403": {
                         "description": "Forbidden (access denied)",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "404": {
                         "description": "File not found",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Download error",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     }
                 }
@@ -303,44 +312,31 @@
                     "200": {
                         "description": "Message and physical_deleted status",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/contract.DeleteResponse"
                         }
                     },
                     "401": {
                         "description": "Unauthorized",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "403": {
                         "description": "Forbidden (access denied)",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "404": {
                         "description": "File not found",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Delete error",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     }
                 }
@@ -374,44 +370,105 @@
                     "200": {
                         "description": "File metadata wrapper (database_record and physical_storage)",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/contract.FileMetadataResponse"
                         }
                     },
                     "401": {
                         "description": "Unauthorized",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "403": {
                         "description": "Forbidden (access denied)",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "404": {
                         "description": "File not found",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Metadata error",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "patch": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "description": "Updates file metadata fields such as filename and tags for the specified file.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "files"
+                ],
+                "summary": "Update file metadata",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "File ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Metadata updates",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/contract.UpdateFileMetadataRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/contract.FileResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid request or metadata update payload",
+                        "schema": {
+                            "$ref": "#/definitions/contract.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/contract.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden (access denied)",
+                        "schema": {
+                            "$ref": "#/definitions/contract.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "File not found",
+                        "schema": {
+                            "$ref": "#/definitions/contract.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Update metadata error",
+                        "schema": {
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     }
                 }
@@ -424,32 +481,7 @@
                         "BasicAuth": []
                     }
                 ],
-                "description": "Establishes a Streamable HTTP (SSE) connection channel.",
-                "produces": [
-                    "text/event-stream"
-                ],
-                "tags": [
-                    "mcp"
-                ],
-                "summary": "Connect to MCP Server (SSE)",
-                "responses": {
-                    "200": {
-                        "description": "SSE Connection established",
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                }
-            }
-        },
-        "/mcp/message": {
-            "post": {
-                "security": [
-                    {
-                        "BasicAuth": []
-                    }
-                ],
-                "description": "Sends JSON-RPC 2.0 request messages (like initialize, tools/list, tools/call).",
+                "description": "Handles MCP Streamable HTTP requests over a single /mcp endpoint.",
                 "consumes": [
                     "application/json"
                 ],
@@ -459,36 +491,104 @@
                 "tags": [
                     "mcp"
                 ],
-                "summary": "Post message to MCP Server",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Session ID (SSE Client)",
-                        "name": "sessionId",
-                        "in": "query",
-                        "required": true
-                    },
-                    {
-                        "description": "JSON-RPC Request",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                ],
+                "summary": "MCP Server (Streamable HTTP)",
                 "responses": {
                     "200": {
-                        "description": "Message accepted",
+                        "description": "MCP response",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/http.StreamResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "description": "Handles MCP Streamable HTTP requests over a single /mcp endpoint.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "MCP Server (Streamable HTTP)",
+                "responses": {
+                    "200": {
+                        "description": "MCP response",
+                        "schema": {
+                            "$ref": "#/definitions/http.StreamResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "description": "Handles MCP Streamable HTTP requests over a single /mcp endpoint.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "MCP Server (Streamable HTTP)",
+                "responses": {
+                    "200": {
+                        "description": "MCP response",
+                        "schema": {
+                            "$ref": "#/definitions/http.StreamResponse"
                         }
                     }
                 }
             }
         },
-        "/users/register": {
+        "/users/me": {
+            "get": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "Get current user profile",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/contract.MeResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/contract.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "User not found",
+                        "schema": {
+                            "$ref": "#/definitions/contract.ErrorResponse"
+                        }
+                    }
+                }
+            },
             "post": {
                 "description": "Register a new user in the system using Argon2id for password hashing.",
                 "consumes": [
@@ -522,10 +622,61 @@
                     "400": {
                         "description": "Invalid input or registration error",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/contract.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "patch": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "Update current user profile",
+                "parameters": [
+                    {
+                        "description": "Current user profile updates",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/contract.UpdateMeRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/contract.MeResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid input",
+                        "schema": {
+                            "$ref": "#/definitions/contract.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/contract.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Update failed",
+                        "schema": {
+                            "$ref": "#/definitions/contract.ErrorResponse"
                         }
                     }
                 }
@@ -533,17 +684,99 @@
         }
     },
     "definitions": {
+        "contract.DeleteResponse": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string"
+                },
+                "physical_deleted": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "contract.ErrorResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                }
+            }
+        },
+        "contract.FileConflictResponse": {
+            "type": "object",
+            "properties": {
+                "conflicting_hash": {
+                    "type": "string"
+                },
+                "conflicting_id": {
+                    "type": "string"
+                },
+                "error": {
+                    "type": "string"
+                }
+            }
+        },
+        "contract.FileListResponse": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/contract.FileResponse"
+                    }
+                },
+                "page": {
+                    "type": "integer"
+                },
+                "page_size": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                },
+                "total_pages": {
+                    "type": "integer"
+                }
+            }
+        },
+        "contract.FileMetadataResponse": {
+            "type": "object",
+            "properties": {
+                "database_record": {
+                    "$ref": "#/definitions/contract.FileResponse"
+                },
+                "physical_storage": {
+                    "$ref": "#/definitions/contract.StorageMetadataResponse"
+                }
+            }
+        },
         "contract.FileResponse": {
             "type": "object",
             "properties": {
+                "author_id": {
+                    "type": "string"
+                },
                 "content_type": {
                     "type": "string"
                 },
                 "created_at": {
                     "type": "string"
                 },
+                "description": {
+                    "type": "string"
+                },
+                "embedding_status": {
+                    "type": "string"
+                },
                 "filename": {
                     "type": "string"
+                },
+                "group_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "hash": {
                     "type": "string"
@@ -551,13 +784,33 @@
                 "id": {
                     "type": "string"
                 },
-                "owner_id": {
-                    "type": "string"
-                },
                 "size": {
                     "type": "integer"
                 },
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "contract.MeResponse": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "username": {
                     "type": "string"
                 }
             }
@@ -591,28 +844,60 @@
                 }
             }
         },
+        "contract.SearchListResponse": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/contract.SearchResponseItem"
+                    }
+                },
+                "nlp_expansion": {
+                    "type": "boolean"
+                }
+            }
+        },
         "contract.SearchResponseItem": {
             "type": "object",
             "properties": {
+                "author_id": {
+                    "type": "string"
+                },
+                "chunk_id": {
+                    "type": "string"
+                },
+                "chunk_text": {
+                    "type": "string"
+                },
                 "content_type": {
                     "type": "string"
                 },
                 "created_at": {
                     "type": "string"
                 },
+                "description": {
+                    "type": "string"
+                },
                 "distance": {
                     "type": "number"
                 },
+                "embedding_status": {
+                    "type": "string"
+                },
                 "filename": {
                     "type": "string"
+                },
+                "group_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "hash": {
                     "type": "string"
                 },
                 "id": {
-                    "type": "string"
-                },
-                "owner_id": {
                     "type": "string"
                 },
                 "score": {
@@ -624,7 +909,69 @@
                 "source_query": {
                     "type": "string"
                 },
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "contract.StorageMetadataResponse": {
+            "type": "object",
+            "properties": {
+                "content_length": {
+                    "type": "integer"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "last_modified": {
+                    "type": "string"
+                }
+            }
+        },
+        "contract.UpdateFileMetadataRequest": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "filename": {
+                    "type": "string"
+                },
+                "group_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "contract.UpdateMeRequest": {
+            "type": "object",
+            "properties": {
+                "password": {
+                    "type": "string"
+                },
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "http.StreamResponse": {
+            "type": "object",
+            "properties": {
+                "message": {
                     "type": "string"
                 }
             }
@@ -633,6 +980,11 @@
     "securityDefinitions": {
         "BasicAuth": {
             "type": "basic"
+        },
+        "BearerAuth": {
+            "type": "apiKey",
+            "name": "Authorization",
+            "in": "header"
         }
     }
 }

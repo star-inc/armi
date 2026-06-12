@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
-	"github.com/supersonictw/armi/pkgs/file"
+	"github.com/star-inc/armi/pkgs/file"
 )
 
 // OllamaEmbedder implements file.Embedder interface for Ollama service.
@@ -29,6 +29,14 @@ type OpenAIEmbedder struct {
 	APIKey  string
 	Model   string
 	Client  *http.Client
+}
+
+func configuredEmbeddingDimension() int {
+	dim := viper.GetInt("embedding.dimension")
+	if dim <= 0 {
+		return 768
+	}
+	return dim
 }
 
 // NewEmbedder constructs a new file.Embedder based on Viper configuration.
@@ -52,7 +60,7 @@ func NewEmbedder() (file.Embedder, error) {
 		apiKey := viper.GetString("embedding.openai.api_key")
 		baseURL := viper.GetString("embedding.openai.base_url")
 		if baseURL == "" {
-			baseURL = "https://api.openai.com/v1"
+			baseURL = "https://api.portkey.ai/v1"
 		}
 		slog.Info("Initializing OpenAI Embedder", "model", model, "base_url", baseURL)
 		return &OpenAIEmbedder{
@@ -69,7 +77,7 @@ func NewEmbedder() (file.Embedder, error) {
 // Embed generates a vector embedding for text using Ollama /api/embed API.
 func (o *OllamaEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	if text == "" {
-		return make([]float32, 768), nil
+		return make([]float32, configuredEmbeddingDimension()), nil
 	}
 
 	base, err := url.Parse(o.BaseURL)
@@ -132,7 +140,7 @@ func (o *OllamaEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 // Embed generates a vector embedding for text using OpenAI /embeddings API.
 func (o *OpenAIEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	if text == "" {
-		return make([]float32, 768), nil
+		return make([]float32, configuredEmbeddingDimension()), nil
 	}
 
 	base, err := url.Parse(o.BaseURL)

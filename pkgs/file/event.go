@@ -3,12 +3,12 @@ package file
 import (
 	"context"
 
-	"github.com/supersonictw/armi/pkgs/contract"
+	"github.com/star-inc/armi/pkgs/contract"
 )
 
 // EventPublisher interface abstracts event publishing to RabbitMQ.
 type EventPublisher interface {
-	PublishEvent(ctx context.Context, eventType string, userID string, payload map[string]interface{})
+	PublishEvent(ctx context.Context, eventType string, userID string, payload map[string]interface{}) error
 	Close() error
 }
 
@@ -20,4 +20,3 @@ type EmbeddingJobPublisher interface {
 	IsAvailable() bool
 	Close() error
 }
-

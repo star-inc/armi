@@ -7,9 +7,11 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/supersonictw/armi/internal/infrastructure/jwtauth"
-	"github.com/supersonictw/armi/internal/usecase"
-	"github.com/supersonictw/armi/pkgs/file"
+	"github.com/star-inc/armi/internal/infrastructure/jwtauth"
+	"github.com/star-inc/armi/internal/usecase"
+	"github.com/star-inc/armi/pkgs/contract"
+	"github.com/star-inc/armi/pkgs/file"
+	"github.com/spf13/viper"
 )
 
 // AuthMiddleware handles both HTTP Basic Auth and JWT Bearer authentication.
@@ -40,7 +42,7 @@ func AuthMiddleware(
 				"reason": "missing authorization header",
 			})
 			c.Header("WWW-Authenticate", `Basic realm="armi", Bearer realm="armi"`)
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "unauthorized"})
 			return
 		}
 
@@ -53,7 +55,7 @@ func AuthMiddleware(
 
 		default:
 			slog.Warn("unsupported Authorization scheme", "ip", ip, "path", path, "header_prefix", strings.SplitN(authHeader, " ", 2)[0])
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unsupported authorization scheme"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "unsupported authorization scheme"})
 			return
 		}
 	}
@@ -69,14 +71,14 @@ func handleBasicAuth(
 ) {
 	if scheme == jwtauth.AuthSchemeBearer {
 		slog.Warn("Basic Auth rejected: server requires Bearer only", "ip", ip, "path", path)
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "basic auth not accepted, use bearer token"})
+		c.AbortWithStatusJSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "basic auth not accepted, use bearer token"})
 		return
 	}
 
 	username, password, ok := c.Request.BasicAuth()
 	if !ok {
 		slog.Warn("malformed Basic Auth header", "ip", ip, "path", path)
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "malformed basic auth header"})
+		c.AbortWithStatusJSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "malformed basic auth header"})
 		return
 	}
 
@@ -90,7 +92,7 @@ func handleBasicAuth(
 			"reason":   err.Error(),
 		})
 		c.Header("WWW-Authenticate", `Basic realm="armi"`)
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.AbortWithStatusJSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "unauthorized"})
 		return
 	}
 
@@ -116,13 +118,13 @@ func handleBearerAuth(
 ) {
 	if scheme == jwtauth.AuthSchemeBasic {
 		slog.Warn("Bearer token rejected: server requires Basic only", "ip", ip, "path", path)
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "bearer token not accepted, use basic auth"})
+		c.AbortWithStatusJSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "bearer token not accepted, use basic auth"})
 		return
 	}
 
 	if verifier == nil {
 		slog.Error("Bearer auth attempted but JWT verifier is not configured", "ip", ip, "path", path)
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "bearer authentication is not configured"})
+		c.AbortWithStatusJSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "bearer authentication is not configured"})
 		return
 	}
 
@@ -135,8 +137,19 @@ func handleBearerAuth(
 			"path":   path,
 			"reason": err.Error(),
 		})
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
+		c.AbortWithStatusJSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "invalid or expired token"})
 		return
+	}
+
+	if viper.GetBool("auth.rbac.enabled") {
+		requiredScopes := scopesForRoute(method, path)
+		for _, sc := range requiredScopes {
+			if !claims.HasScope(sc) {
+				slog.Warn("bearer auth: missing required scope", "scope", sc, "path", path, "method", method)
+				c.AbortWithStatusJSON(http.StatusForbidden, contract.ErrorResponse{Error: "insufficient scope"})
+				return
+			}
+		}
 	}
 
 	// sub = armi user ID; look up the user to ensure they still exist.
@@ -150,7 +163,7 @@ func handleBearerAuth(
 			"path":   path,
 			"reason": "user not found",
 		})
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.AbortWithStatusJSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "unauthorized"})
 		return
 	}
 
@@ -163,6 +176,33 @@ func handleBearerAuth(
 		"http_verb": method,
 	})
 	c.Next()
+}
+
+func scopesForRoute(method string, path string) []string {
+	switch {
+	case strings.HasPrefix(path, "/api/v1/files/search"), method == http.MethodGet:
+		return []string{"files:read"}
+	case strings.HasPrefix(path, "/api/v1/files/") && strings.HasSuffix(path, "/metadata") && method == http.MethodGet:
+		return []string{"files:read"}
+	case strings.HasPrefix(path, "/api/v1/files/") && strings.HasSuffix(path, "/metadata") && method == http.MethodPatch:
+		return []string{"files:write"}
+	case strings.HasPrefix(path, "/api/v1/files/") && method == http.MethodGet:
+		return []string{"files:read"}
+	case strings.HasPrefix(path, "/api/v1/files/") && method == http.MethodDelete:
+		return []string{"files:delete"}
+	case strings.HasPrefix(path, "/api/v1/files") && method == http.MethodGet:
+		return []string{"files:read"}
+	case strings.HasPrefix(path, "/api/v1/files") && method == http.MethodPost:
+		return []string{"files:write"}
+	case strings.HasPrefix(path, "/api/v1/users/me") && method == http.MethodGet:
+		return []string{"users:read"}
+	case strings.HasPrefix(path, "/api/v1/users/me") && method == http.MethodPatch:
+		return []string{"users:write"}
+	case strings.HasPrefix(path, "/api/v1/mcp"):
+		return []string{"mcp:access"}
+	default:
+		return nil
+	}
 }
 
 // FileValidationMiddleware validates that the uploaded file has a valid extension.
@@ -190,7 +230,7 @@ func FileValidationMiddleware(publisher file.EventPublisher) gin.HandlerFunc {
 
 		fileHeader, err := c.FormFile("file")
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing file field"})
+			c.AbortWithStatusJSON(http.StatusBadRequest, contract.ErrorResponse{Error: "missing file field"})
 			return
 		}
 
@@ -202,9 +242,7 @@ func FileValidationMiddleware(publisher file.EventPublisher) gin.HandlerFunc {
 				"content_type": fileHeader.Header.Get("Content-Type"),
 				"reason":       "unsupported file format, allowed: PDF, Word, PPT, Excel, TXT, RTF, Markdown",
 			})
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
-				"error": "unsupported file format. allowed: .pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .txt, .rtf, .md",
-			})
+			c.AbortWithStatusJSON(http.StatusBadRequest, contract.ErrorResponse{Error: "unsupported file format. allowed: .pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .txt, .rtf, .md"})
 			return
 		}
 

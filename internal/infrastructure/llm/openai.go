@@ -8,7 +8,7 @@ import (
 
 	openai "github.com/sashabaranov/go-openai"
 	"github.com/spf13/viper"
-	"github.com/supersonictw/armi/pkgs/file"
+	"github.com/star-inc/armi/pkgs/file"
 )
 
 // OpenAILLM implements file.LLM using github.com/sashabaranov/go-openai.
@@ -32,7 +32,7 @@ func NewOpenAILLM() (file.LLM, error) {
 
 	modelName := viper.GetString("llm.model")
 	if modelName == "" {
-		modelName = "gpt-4o-mini"
+		modelName = "@default/anthropic/claude-haiku-4-5"
 	}
 
 	slog.Info("Initializing OpenAI LLM client for NLP search expansion", "model", modelName, "base_url", baseURL)
@@ -105,6 +105,10 @@ func (l *OpenAILLM) GenerateQueries(ctx context.Context, query string, num int) 
 // PerformOCR performs OCR on a base64 encoded image using OpenAI Vision API.
 func (l *OpenAILLM) PerformOCR(ctx context.Context, imageBase64 string) (string, error) {
 	if imageBase64 == "" {
+		return "", nil
+	}
+	if !viper.GetBool("llm.ocr.enabled") {
+		slog.Debug("OCR is disabled by configuration", "config_key", "llm.ocr.enabled")
 		return "", nil
 	}
 
