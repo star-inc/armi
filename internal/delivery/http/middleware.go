@@ -141,6 +141,7 @@ func handleBearerAuth(
 		return
 	}
 
+	// If RBAC is disabled, bypass JWT scope validations (delegated to Traefik/Caddy).
 	if viper.GetBool("auth.rbac.enabled") {
 		requiredScopes := scopesForRoute(method, path)
 		for _, sc := range requiredScopes {

@@ -87,6 +87,7 @@ func InitConfig() {
 	// Auth Scheme Defaults
 	// Accepted values: "basic", "bearer", "both"
 	viper.SetDefault("auth.scheme", "both")
+	// auth.rbac.enabled: If false (default), bypasses all access controls (delegated to external proxies like Traefik/Caddy).
 	viper.SetDefault("auth.rbac.enabled", false)
 
 	// JWT Defaults

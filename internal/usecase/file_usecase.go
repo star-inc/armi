@@ -87,6 +87,7 @@ func buildStorageKey(sha3Hash string) string {
 }
 
 func (uc *FileUsecase) ensureGroupPermission(ctx context.Context, userID string, groupIDs []string, required file.GroupPermission) error {
+	// If RBAC is disabled, bypass all access controls (delegated to Traefik/Caddy).
 	if !viper.GetBool("auth.rbac.enabled") {
 		return nil
 	}
@@ -416,6 +417,7 @@ func (uc *FileUsecase) ListPaginated(ctx context.Context, userID string, tag str
 		total int64
 		err   error
 	)
+	// If RBAC is disabled, list all files globally (delegated to Traefik/Caddy).
 	if viper.GetBool("auth.rbac.enabled") {
 		files, total, err = uc.fileRepo.ListAccessible(ctx, userID, tag, file.GroupPermissionRead, pageSize, offset)
 	} else {

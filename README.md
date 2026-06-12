@@ -65,6 +65,13 @@ rabbitmq:
   broadcast_exchange: "armi.events.broadcast"
   embedding_queue: "armi.embedding.jobs"
   embedding_status_queue: "armi.embedding.status"
+
+auth:
+  scheme: "both"     # basic, bearer, or both
+  rbac:
+    enabled: false   # If false (default), all group, scope, and owner checks are bypassed.
+                     # This is designed for deployments delegating access control checks
+                     # to an external reverse proxy / gateway like Traefik or Caddy.
 ```
 
 ---
