@@ -49,10 +49,11 @@ func InitConfig() {
 
 	// Embedding Defaults
 	viper.SetDefault("embedding.provider", "ollama")
-	viper.SetDefault("embedding.model", "nomic-embed-text-v2")
+	viper.SetDefault("embedding.model", "nomic-embed-text-v2-moe")
+	viper.SetDefault("embedding.dimension", 768)
 	viper.SetDefault("embedding.ollama.base_url", "http://localhost:11434")
 	viper.SetDefault("embedding.openai.api_key", "")
-	viper.SetDefault("embedding.openai.base_url", "https://api.openai.com/v1")
+	viper.SetDefault("embedding.openai.base_url", "https://api.portkey.ai/v1")
 
 	// VectorDB Defaults
 	viper.SetDefault("vector.provider", "sqlite-vec")
@@ -68,20 +69,25 @@ func InitConfig() {
 	viper.SetDefault("rabbitmq.url", "amqp://guest:guest@localhost:5672/")
 	viper.SetDefault("rabbitmq.exchange", "armi.events")
 	viper.SetDefault("rabbitmq.routing_key", "user.events")
-	viper.SetDefault("rabbitmq.broadcast_exchange", "armi.events.broadcast") // fanout, for progress events
-	viper.SetDefault("rabbitmq.embedding_queue", "armi.embedding.jobs")      // durable work queue
+	viper.SetDefault("rabbitmq.embedding_status_routing_key", "embedding.status")
+	viper.SetDefault("rabbitmq.broadcast_exchange", "armi.events.broadcast")     // fanout, for progress events
+	viper.SetDefault("rabbitmq.embedding_queue", "armi.embedding.jobs")          // durable work queue
+	viper.SetDefault("rabbitmq.embedding_status_queue", "armi.embedding.status") // durable DB status updates
 
-
-	// NLP Search and LLM Defaults
-	viper.SetDefault("search.nlp_expansion.enabled", true)
-	viper.SetDefault("search.nlp_expansion.max_limit", 10)
-	viper.SetDefault("llm.model", "gpt-4o-mini")
+	// LLM Defaults
+	viper.SetDefault("llm.query_expansion.enabled", false)
+	viper.SetDefault("llm.query_expansion.max_limit", 10)
+	viper.SetDefault("llm.ocr.enabled", false)
+	viper.SetDefault("llm.ocr.max_pages", 20)
+	viper.SetDefault("llm.ocr.max_images", 20)
+	viper.SetDefault("llm.model", "@default/anthropic/claude-haiku-4-5")
 	viper.SetDefault("llm.openai.api_key", "")
-	viper.SetDefault("llm.openai.base_url", "https://api.openai.com/v1")
+	viper.SetDefault("llm.openai.base_url", "https://api.portkey.ai/v1")
 
 	// Auth Scheme Defaults
 	// Accepted values: "basic", "bearer", "both"
 	viper.SetDefault("auth.scheme", "both")
+	viper.SetDefault("auth.rbac.enabled", false)
 
 	// JWT Defaults
 	viper.SetDefault("jwt.issuer", "")

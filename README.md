@@ -46,33 +46,95 @@ vector:
   provider: "sqlite-vec"
 
 llm:
-  model: "gpt-4o-mini"
+  model: "@default/anthropic/claude-haiku-4-5"
+  query_expansion:
+    enabled: true
+    max_limit: 10
+  ocr:
+    enabled: false
   openai:
     api_key: "your-api-key"
     base_url: ""
 
-search:
-  nlp_expansion:
-    enabled: true
-    max_limit: 10
+rabbitmq:
+  enabled: false
+  url: "amqp://guest:guest@localhost:5672/"
+  exchange: "armi.events"
+  routing_key: "user.events"
+  embedding_status_routing_key: "embedding.status"
+  broadcast_exchange: "armi.events.broadcast"
+  embedding_queue: "armi.embedding.jobs"
+  embedding_status_queue: "armi.embedding.status"
 ```
 
 ---
 
 ## Development & Usage
 
+### Build
+
+Build the Armi executable before running the server or client commands:
+
+```bash
+make build
+```
+
+This produces the executable at `./build/armi`.
+
 ### Running Locally
+
 To start the HTTP server with hot-reload (using Air):
+
 ```bash
 make dev
 ```
-Or run directly:
+
+Or run the compiled executable:
+
 ```bash
-go run cmd/armi/main.go
+./build/armi serve
+```
+
+### REST Client
+
+Use the built-in client to interact with the Armi REST API:
+
+Client connection settings can be provided through environment variables:
+
+```bash
+export ARMI_BASE_URL=http://127.0.0.1:8080
+export ARMI_USERNAME=demo
+export ARMI_PASSWORD=secret
+export ARMI_TIMEOUT=30s
+```
+
+Bearer authentication can use `ARMI_TOKEN` instead of `ARMI_USERNAME` and `ARMI_PASSWORD`.
+Explicit command-line flags take precedence over environment variables.
+
+```bash
+# Health and users
+./build/armi client health
+./build/armi client user register --account demo --account-password secret
+./build/armi client user me --username demo --password secret
+./build/armi client user update --new-username demo2 --username demo --password secret
+
+# Upload
+./build/armi client upload file --path ./docs/report.pdf --base-url http://127.0.0.1:8080 --username demo --password secret
+./build/armi client upload folder --path ./docs --base-url http://127.0.0.1:8080 --username demo --password secret
+
+# List, download, metadata, update, delete, and search
+./build/armi client file list --page 1 --page-size 20 --username demo --password secret
+./build/armi client file download --id FILE_ID --output ./downloads/ --username demo --password secret
+./build/armi client file metadata --id FILE_ID --username demo --password secret
+./build/armi client file update --id FILE_ID --description "Updated" --tags golang,docs --username demo --password secret
+./build/armi client file search --query "semantic search" --limit 5 --username demo --password secret
+./build/armi client file delete --id FILE_ID --username demo --password secret
 ```
 
 ### Running Tests
+
 To run unit and integration tests:
+
 ```bash
 go test ./...
 ```
@@ -82,12 +144,17 @@ go test ./...
 ## API Endpoints (v1)
 
 ### Authentication
+
 Most endpoints require basic auth (`Authorization: Basic <credentials>`) or JWT (`Authorization: Bearer <token>`).
 
 ### User Endpoints
-- `POST /api/v1/users/register`: Register a new user.
+
+- `POST /api/v1/users/me`: Register a new user.
+- `GET /api/v1/users/me`: Get current authenticated user profile.
+- `PATCH /api/v1/users/me`: Update current authenticated user profile.
 
 ### Document/File Endpoints
+
 - `POST /api/v1/files`: Upload a file via multipart form. Supports tags parameter (e.g. `tags=golang,test` or multiple `tags` form entries).
 - `GET /api/v1/files`: List all user files. Filter by tag with `GET /api/v1/files?tag=xxxx`.
 - `GET /api/v1/files/:id`: Download raw file content.
@@ -96,5 +163,7 @@ Most endpoints require basic auth (`Authorization: Basic <credentials>`) or JWT 
 - `GET /api/v1/files/search?q=query`: Search files semantically. Supports optional params `nlp_expansion=true`, `limit=5`, and `expansion_num=3`.
 
 ### Model Context Protocol (MCP)
-- `GET /api/v1/mcp`: Establish SSE connection channel.
-- `POST /api/v1/mcp/message`: Post JSON-RPC 2.0 messages (e.g., `tools/list`, `tools/call`).
+
+- `GET /api/v1/mcp`: Open the Streamable HTTP listening stream for an existing session.
+- `POST /api/v1/mcp`: Send JSON-RPC 2.0 messages over Streamable HTTP (e.g., `initialize`, `tools/list`, `tools/call`).
+- `DELETE /api/v1/mcp`: Terminate a Streamable HTTP session.

@@ -17,8 +17,8 @@ import (
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"github.com/spf13/viper"
-	"github.com/supersonictw/armi/internal/infrastructure/database"
-	"github.com/supersonictw/armi/pkgs/file"
+	"github.com/star-inc/armi/internal/infrastructure/database"
+	"github.com/star-inc/armi/pkgs/file"
 )
 
 // SQLiteVectorDB implements file.VectorDB using sqlite-vec virtual table.
@@ -263,6 +263,11 @@ func (s *SQLiteVectorDB) Close() error {
 // === QdrantVectorDB ===
 
 func (q *QdrantVectorDB) ensureCollection() error {
+	dimension := viper.GetInt("embedding.dimension")
+	if dimension <= 0 {
+		dimension = 768
+	}
+
 	base, err := url.Parse(q.URL)
 	if err != nil {
 		return fmt.Errorf("invalid qdrant url: %w", err)
@@ -281,7 +286,7 @@ func (q *QdrantVectorDB) ensureCollection() error {
 	createURL := base.JoinPath("collections", q.Collection).String()
 	reqBody := map[string]interface{}{
 		"vectors": map[string]interface{}{
-			"size":     768,
+			"size":     dimension,
 			"distance": "Cosine",
 		},
 	}
@@ -307,7 +312,7 @@ func (q *QdrantVectorDB) ensureCollection() error {
 		return fmt.Errorf("failed to create collection: status=%s response=%s", cResp.Status, string(body))
 	}
 
-	slog.Info("Created Qdrant collection", "collection", q.Collection)
+	slog.Info("Created Qdrant collection", "collection", q.Collection, "dimension", dimension)
 	return nil
 }
 

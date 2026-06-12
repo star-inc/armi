@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/supersonictw/armi/pkgs/user"
+	"github.com/star-inc/armi/pkgs/user"
 	"gorm.io/gorm"
 )
 
@@ -45,6 +45,27 @@ func (r *GormUserRepository) Create(ctx context.Context, u *user.User) error {
 	}
 	u.CreatedAt = gu.CreatedAt
 	u.UpdatedAt = gu.UpdatedAt
+	return nil
+}
+
+// Update modifies username/password hash of an existing user.
+func (r *GormUserRepository) Update(ctx context.Context, u *user.User) error {
+	updates := map[string]interface{}{
+		"username":      u.Username,
+		"password_hash": u.PasswordHash,
+	}
+	if err := r.db.WithContext(ctx).Model(&gormUser{}).Where("id = ?", u.ID).Updates(updates).Error; err != nil {
+		return err
+	}
+	// refresh updated fields
+	latest, err := r.GetByID(ctx, u.ID)
+	if err != nil {
+		return err
+	}
+	if latest != nil {
+		u.UpdatedAt = latest.UpdatedAt
+		u.CreatedAt = latest.CreatedAt
+	}
 	return nil
 }
 

@@ -9,14 +9,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/supersonictw/armi/internal/usecase"
-	"github.com/supersonictw/armi/pkgs/user"
+	"github.com/star-inc/armi/internal/usecase"
+	"github.com/star-inc/armi/pkgs/user"
 )
 
-// MCPHandler handles Model Context Protocol requests over SSE.
+// MCPHandler handles Model Context Protocol requests over Streamable HTTP.
 type MCPHandler struct {
-	fileUsecase *usecase.FileUsecase
-	SSEServer   *server.SSEServer
+	fileUsecase          *usecase.FileUsecase
+	StreamableHTTPServer *server.StreamableHTTPServer
 }
 
 // NewMCPHandler initializes the MCP server and registers tools.
@@ -29,8 +29,10 @@ func NewMCPHandler(fileUsecase *usecase.FileUsecase) *MCPHandler {
 
 	// 1. Register list_files tool
 	listFilesTool := mcp.NewTool("list_files",
-		mcp.WithDescription("列出當前使用者上傳的所有檔案清單"),
+		mcp.WithDescription("列出當前使用者可存取的檔案清單"),
 		mcp.WithString("tag", mcp.Description("過濾特定的檔案標籤（選填）")),
+		mcp.WithNumber("page", mcp.Description("頁碼，從 1 開始"), mcp.DefaultNumber(1)),
+		mcp.WithNumber("page_size", mcp.Description("每頁筆數，最多 100 筆"), mcp.DefaultNumber(20)),
 	)
 	mcpServer.AddTool(listFilesTool, h.handleListFiles)
 
@@ -51,13 +53,7 @@ func NewMCPHandler(fileUsecase *usecase.FileUsecase) *MCPHandler {
 	)
 	mcpServer.AddTool(readFileTool, h.handleReadFile)
 
-	// Wrap in SSE server. Messages will be posted to /api/v1/mcp/message
-	sseServer := server.NewSSEServer(
-		mcpServer,
-		server.WithSSEEndpoint("/api/v1/mcp"),
-		server.WithMessageEndpoint("/api/v1/mcp/message"),
-	)
-	h.SSEServer = sseServer
+	h.StreamableHTTPServer = server.NewStreamableHTTPServer(mcpServer)
 
 	return h
 }
@@ -101,7 +97,27 @@ func (h *MCPHandler) handleListFiles(ctx context.Context, request mcp.CallToolRe
 		}
 	}
 
-	files, err := h.fileUsecase.List(ctx, dbUser.ID, tag)
+	page := 1
+	if pageVal, exists := args["page"]; exists {
+		if value, ok := pageVal.(float64); ok {
+			page = int(value)
+		}
+	}
+	if page <= 0 {
+		return nil, fmt.Errorf("page must be a positive integer")
+	}
+
+	pageSize := 20
+	if pageSizeVal, exists := args["page_size"]; exists {
+		if value, ok := pageSizeVal.(float64); ok {
+			pageSize = int(value)
+		}
+	}
+	if pageSize <= 0 || pageSize > 100 {
+		return nil, fmt.Errorf("page_size must be between 1 and 100")
+	}
+
+	files, err := h.fileUsecase.ListPaginated(ctx, dbUser.ID, tag, page, pageSize)
 	if err != nil {
 		slog.Error("MCP list_files tool failed", "user_id", dbUser.ID, "error", err)
 		return nil, fmt.Errorf("failed to list files: %w", err)
@@ -213,29 +229,17 @@ func (h *MCPHandler) handleReadFile(ctx context.Context, request mcp.CallToolReq
 	}, nil
 }
 
-// SSEConnect handles the SSE connection handshake for the MCP server.
-// @Summary      Connect to MCP Server (SSE)
-// @Description  Establishes a Streamable HTTP (SSE) connection channel.
-// @Tags         mcp
-// @Produce      text/event-stream
-// @Success      200 {string} string "SSE Connection established"
-// @Security     BasicAuth
-// @Router       /mcp [get]
-func (h *MCPHandler) SSEConnect(c *gin.Context) {
-	gin.WrapH(h.SSEServer.SSEHandler())(c)
-}
-
-// ReceiveMessage handles JSON-RPC 2.0 messages from the client.
-// @Summary      Post message to MCP Server
-// @Description  Sends JSON-RPC 2.0 request messages (like initialize, tools/list, tools/call).
+// StreamableHTTP handles MCP Streamable HTTP requests.
+// @Summary      MCP Server (Streamable HTTP)
+// @Description  Handles MCP Streamable HTTP requests over a single /mcp endpoint.
 // @Tags         mcp
 // @Accept       json
 // @Produce      json
-// @Param        sessionId query string true "Session ID (SSE Client)"
-// @Param        request body string true "JSON-RPC Request"
-// @Success      200 {string} string "Message accepted"
+// @Success      200 {object} StreamResponse "MCP response"
 // @Security     BasicAuth
-// @Router       /mcp/message [post]
-func (h *MCPHandler) ReceiveMessage(c *gin.Context) {
-	gin.WrapH(h.SSEServer.MessageHandler())(c)
+// @Router       /mcp [get]
+// @Router       /mcp [post]
+// @Router       /mcp [delete]
+func (h *MCPHandler) StreamableHTTP(c *gin.Context) {
+	gin.WrapH(h.StreamableHTTPServer)(c)
 }

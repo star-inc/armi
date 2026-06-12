@@ -1,4 +1,4 @@
-module github.com/supersonictw/armi
+module github.com/star-inc/armi
 
 go 1.26.3
 
@@ -7,6 +7,7 @@ require (
 	github.com/apache/opendal-go-services/memory v0.1.15
 	github.com/apache/opendal/bindings/go v0.1.15
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
+	github.com/go-resty/resty/v2 v2.17.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/lu4p/cat v0.1.5
@@ -50,6 +51,7 @@ require (
 	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/pgx/v5 v5.7.2 // indirect
@@ -77,6 +79,7 @@ require (
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
+	github.com/spf13/cobra v1.10.1 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tmc/langchaingo v0.1.14 // indirect

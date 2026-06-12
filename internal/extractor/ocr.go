@@ -14,13 +14,16 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/supersonictw/armi/pkgs/file"
+	"github.com/star-inc/armi/pkgs/file"
 )
 
 // PerformOCRForPDF converts a PDF into page images using Ghostscript, and runs LLM-based OCR on each page.
-func PerformOCRForPDF(ctx context.Context, pdfContent []byte, llm file.LLM) (string, error) {
+func PerformOCRForPDF(ctx context.Context, pdfContent []byte, llm file.LLM, maxPages int) (string, error) {
 	if len(pdfContent) == 0 || llm == nil {
 		return "", nil
+	}
+	if maxPages <= 0 {
+		maxPages = 20
 	}
 
 	// Create temp directory for images
@@ -40,6 +43,7 @@ func PerformOCRForPDF(ctx context.Context, pdfContent []byte, llm file.LLM) (str
 
 	// Convert PDF pages to PNG using Ghostscript:
 	// gs -dNOPAUSE -sDEVICE=png16m -r150 -sOutputFile=<tempDir>/page-%d.png <pdfPath> -c quit
+	// We optimize by rendering only the pages we will actually OCR.
 	outputPattern := filepath.Join(tempDir, "page-%d.png")
 	cmd := exec.CommandContext(ctx, "gs",
 		"-dNOPAUSE",
@@ -47,6 +51,8 @@ func PerformOCRForPDF(ctx context.Context, pdfContent []byte, llm file.LLM) (str
 		"-dSAFER",
 		"-sDEVICE=png16m",
 		"-r150",
+		"-dFirstPage=1",
+		fmt.Sprintf("-dLastPage=%d", maxPages),
 		"-sOutputFile="+outputPattern,
 		pdfPath,
 	)
@@ -72,10 +78,9 @@ func PerformOCRForPDF(ctx context.Context, pdfContent []byte, llm file.LLM) (str
 	// Sort image files numerically to process pages in order
 	sortPageFiles(imageFiles)
 
-	// Limit to first 20 pages to prevent API call explosion and high latency
-	if len(imageFiles) > 20 {
-		slog.Info("reached maximum page limit for PDF OCR, skipping remaining pages", "total", len(imageFiles))
-		imageFiles = imageFiles[:20]
+	// Backup check for limit
+	if len(imageFiles) > maxPages {
+		imageFiles = imageFiles[:maxPages]
 	}
 
 	var extractedTexts []string
@@ -104,9 +109,12 @@ func PerformOCRForPDF(ctx context.Context, pdfContent []byte, llm file.LLM) (str
 }
 
 // PerformOCRForPPTX extracts all embedded images from a PPTX file and runs LLM-based OCR on them.
-func PerformOCRForPPTX(ctx context.Context, pptxContent []byte, llm file.LLM) (string, error) {
+func PerformOCRForPPTX(ctx context.Context, pptxContent []byte, llm file.LLM, maxImages int) (string, error) {
 	if len(pptxContent) == 0 || llm == nil {
 		return "", nil
+	}
+	if maxImages <= 0 {
+		maxImages = 20
 	}
 
 	reader, err := zip.NewReader(bytes.NewReader(pptxContent), int64(len(pptxContent)))
@@ -124,9 +132,9 @@ func PerformOCRForPPTX(ctx context.Context, pptxContent []byte, llm file.LLM) (s
 			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
 				imageCount++
 				
-				// Limit to first 20 images to prevent API call explosion
-				if imageCount > 20 {
-					slog.Info("reached maximum image limit for PPTX OCR, skipping remaining images")
+				// Limit to first maxImages to prevent API call explosion
+				if imageCount > maxImages {
+					slog.Info("reached maximum image limit for PPTX OCR, skipping remaining images", "limit", maxImages)
 					break
 				}
 

@@ -12,16 +12,31 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/star-inc/armi/internal/usecase"
+	"github.com/star-inc/armi/pkgs/contract"
+	"github.com/star-inc/armi/pkgs/file"
+	"github.com/star-inc/armi/pkgs/user"
 	"github.com/rs/xid"
-	"github.com/supersonictw/armi/internal/usecase"
-	"github.com/supersonictw/armi/pkgs/file"
-	"github.com/supersonictw/armi/pkgs/user"
+	"github.com/spf13/viper"
 )
 
 // FileHandler handles HTTP endpoints for document file management.
 type FileHandler struct {
 	fileUsecase *usecase.FileUsecase
 	publisher   file.EventPublisher
+}
+
+func parseGroupIDs(raw []string) []string {
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		for _, part := range strings.Split(item, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+	}
+	return out
 }
 
 // NewFileHandler constructs a new FileHandler.
@@ -40,23 +55,23 @@ func NewFileHandler(fileUsecase *usecase.FileUsecase, publisher file.EventPublis
 // @Produce      json
 // @Param        file  formData  file  true  "The document file to upload"
 // @Success      200   {object}  contract.FileResponse
-// @Failure      400   {object}  map[string]string "Missing file or invalid request"
-// @Failure      401   {object}  map[string]string "Unauthorized"
-// @Failure      409   {object}  map[string]string "File conflict (duplicate filename or hash)"
-// @Failure      500   {object}  map[string]string "Internal server error"
+// @Failure      400   {object}  contract.ErrorResponse "Missing file or invalid request"
+// @Failure      401   {object}  contract.ErrorResponse "Unauthorized"
+// @Failure      409   {object}  contract.FileConflictResponse "File conflict (duplicate filename or hash)"
+// @Failure      500   {object}  contract.ErrorResponse "Internal server error"
 // @Security     BasicAuth
 // @Router       /files [post]
 func (h *FileHandler) Upload(c *gin.Context) {
 	val, ok := c.Get("user")
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "unauthorized"})
 		return
 	}
 	dbUser := val.(*user.User)
 
 	multipartFile, fileHeader, err := c.Request.FormFile("file")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing file"})
+		c.JSON(http.StatusBadRequest, contract.ErrorResponse{Error: "missing file"})
 		return
 	}
 	defer func() { _ = multipartFile.Close() }()
@@ -72,7 +87,7 @@ func (h *FileHandler) Upload(c *gin.Context) {
 	var content bytes.Buffer
 	if _, err := io.Copy(&content, multipartFile); err != nil {
 		slog.Error("failed to read upload stream", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read upload file"})
+		c.JSON(http.StatusInternalServerError, contract.ErrorResponse{Error: "failed to read upload file"})
 		return
 	}
 
@@ -102,45 +117,85 @@ func (h *FileHandler) Upload(c *gin.Context) {
 		c.Request.Context(),
 		dbUser.ID,
 		filename,
+		strings.TrimSpace(c.PostForm("description")),
+		parseGroupIDs(c.PostFormArray("group_ids")),
 		fileHeader.Header.Get("Content-Type"),
 		content.Bytes(),
 		transferID,
 		tags,
 	)
 	if err != nil {
-		if errors.Is(err, file.ErrFileConflict) {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		var conflictErr *file.ConflictError
+		if errors.As(err, &conflictErr) {
+			c.JSON(http.StatusConflict, contract.FileConflictResponse{
+				Error:           conflictErr.Error(),
+				ConflictingID:   conflictErr.ConflictingFileID,
+				ConflictingHash: conflictErr.ConflictingFileHash,
+			})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if errors.Is(err, file.ErrFileConflict) {
+			c.JSON(http.StatusConflict, contract.ErrorResponse{Error: err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, contract.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, resp)
 }
 
-// List lists all files owned by the user.
+// List lists files accessible to the user.
 // @Summary      List user files
-// @Description  Retrieves list of all metadata records of files owned by the authenticated user.
+// @Description  Retrieves a paginated list of file metadata records accessible to the authenticated user.
 // @Tags         files
 // @Produce      json
-// @Success      200   {array}   contract.FileResponse
-// @Failure      401   {object}  map[string]string "Unauthorized"
-// @Failure      500   {object}  map[string]string "Database error"
+// @Param        tag        query   string  false  "Filter by tag"
+// @Param        page       query   int     false  "Page number (starts from 1)"
+// @Param        page_size  query   int     false  "Number of items per page (1-100)"
+// @Success      200   {object}  contract.FileListResponse
+// @Failure      400   {object}  contract.ErrorResponse "Invalid pagination parameters"
+// @Failure      401   {object}  contract.ErrorResponse "Unauthorized"
+// @Failure      500   {object}  contract.ErrorResponse "Database error"
 // @Security     BasicAuth
 // @Router       /files [get]
 func (h *FileHandler) List(c *gin.Context) {
 	val, ok := c.Get("user")
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "unauthorized"})
 		return
 	}
 	dbUser := val.(*user.User)
 
 	tag := c.Query("tag")
-	files, err := h.fileUsecase.List(c.Request.Context(), dbUser.ID, tag)
+
+	page := 1
+	if rawPage := c.Query("page"); rawPage != "" {
+		p, err := strconv.Atoi(rawPage)
+		if err != nil || p <= 0 {
+			c.JSON(http.StatusBadRequest, contract.ErrorResponse{Error: "invalid page, must be a positive integer"})
+			return
+		}
+		page = p
+	}
+
+	pageSize := 20
+	if rawPageSize := c.Query("page_size"); rawPageSize != "" {
+		ps, err := strconv.Atoi(rawPageSize)
+		if err != nil || ps <= 0 {
+			c.JSON(http.StatusBadRequest, contract.ErrorResponse{Error: "invalid page_size, must be a positive integer"})
+			return
+		}
+		if ps > 100 {
+			c.JSON(http.StatusBadRequest, contract.ErrorResponse{Error: "invalid page_size, must be <= 100"})
+			return
+		}
+		pageSize = ps
+	}
+
+	files, err := h.fileUsecase.ListPaginated(c.Request.Context(), dbUser.ID, tag, page, pageSize)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		c.JSON(http.StatusInternalServerError, contract.ErrorResponse{Error: "database error"})
 		return
 	}
 
@@ -154,16 +209,16 @@ func (h *FileHandler) List(c *gin.Context) {
 // @Produce      octet-stream
 // @Param        id    path      string  true  "File ID"
 // @Success      200   {file}    file "The downloaded file contents"
-// @Failure      401   {object}  map[string]string "Unauthorized"
-// @Failure      403   {object}  map[string]string "Forbidden (access denied)"
-// @Failure      404   {object}  map[string]string "File not found"
-// @Failure      500   {object}  map[string]string "Download error"
+// @Failure      401   {object}  contract.ErrorResponse "Unauthorized"
+// @Failure      403   {object}  contract.ErrorResponse "Forbidden (access denied)"
+// @Failure      404   {object}  contract.ErrorResponse "File not found"
+// @Failure      500   {object}  contract.ErrorResponse "Download error"
 // @Security     BasicAuth
 // @Router       /files/{id} [get]
 func (h *FileHandler) Download(c *gin.Context) {
 	val, ok := c.Get("user")
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "unauthorized"})
 		return
 	}
 	dbUser := val.(*user.User)
@@ -172,14 +227,14 @@ func (h *FileHandler) Download(c *gin.Context) {
 	data, filename, contentType, size, err := h.fileUsecase.Download(c.Request.Context(), dbUser.ID, fileID)
 	if err != nil {
 		if errors.Is(err, file.ErrFileNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			c.JSON(http.StatusNotFound, contract.ErrorResponse{Error: err.Error()})
 			return
 		}
 		if errors.Is(err, file.ErrAccessDenied) {
-			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			c.JSON(http.StatusForbidden, contract.ErrorResponse{Error: err.Error()})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "download error"})
+		c.JSON(http.StatusInternalServerError, contract.ErrorResponse{Error: "download error"})
 		return
 	}
 
@@ -195,17 +250,17 @@ func (h *FileHandler) Download(c *gin.Context) {
 // @Tags         files
 // @Produce      json
 // @Param        id    path      string  true  "File ID"
-// @Success      200   {object}  map[string]interface{} "File metadata wrapper (database_record and physical_storage)"
-// @Failure      401   {object}  map[string]string "Unauthorized"
-// @Failure      403   {object}  map[string]string "Forbidden (access denied)"
-// @Failure      404   {object}  map[string]string "File not found"
-// @Failure      500   {object}  map[string]string "Metadata error"
+// @Success      200   {object}  contract.FileMetadataResponse "File metadata wrapper (database_record and physical_storage)"
+// @Failure      401   {object}  contract.ErrorResponse "Unauthorized"
+// @Failure      403   {object}  contract.ErrorResponse "Forbidden (access denied)"
+// @Failure      404   {object}  contract.ErrorResponse "File not found"
+// @Failure      500   {object}  contract.ErrorResponse "Metadata error"
 // @Security     BasicAuth
 // @Router       /files/{id}/metadata [get]
 func (h *FileHandler) GetMetadata(c *gin.Context) {
 	val, ok := c.Get("user")
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "unauthorized"})
 		return
 	}
 	dbUser := val.(*user.User)
@@ -214,21 +269,73 @@ func (h *FileHandler) GetMetadata(c *gin.Context) {
 	record, opMetadata, err := h.fileUsecase.GetMetadata(c.Request.Context(), dbUser.ID, fileID)
 	if err != nil {
 		if errors.Is(err, file.ErrFileNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			c.JSON(http.StatusNotFound, contract.ErrorResponse{Error: err.Error()})
 			return
 		}
 		if errors.Is(err, file.ErrAccessDenied) {
-			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			c.JSON(http.StatusForbidden, contract.ErrorResponse{Error: err.Error()})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "metadata error"})
+		c.JSON(http.StatusInternalServerError, contract.ErrorResponse{Error: "metadata error"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"database_record":  record,
-		"physical_storage": opMetadata,
+	c.JSON(http.StatusOK, contract.FileMetadataResponse{
+		DatabaseRecord:  *record,
+		PhysicalStorage: *opMetadata,
 	})
+}
+
+// PatchMetadata updates mutable metadata fields (filename, description, tags) of a file.
+// @Summary      Update file metadata
+// @Description  Updates file metadata fields such as filename and tags for the specified file.
+// @Tags         files
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string                            true  "File ID"
+// @Param        request  body      contract.UpdateFileMetadataRequest true  "Metadata updates"
+// @Success      200      {object}  contract.FileResponse
+// @Failure      400      {object}  contract.ErrorResponse "Invalid request or metadata update payload"
+// @Failure      401      {object}  contract.ErrorResponse "Unauthorized"
+// @Failure      403      {object}  contract.ErrorResponse "Forbidden (access denied)"
+// @Failure      404      {object}  contract.ErrorResponse "File not found"
+// @Failure      500      {object}  contract.ErrorResponse "Update metadata error"
+// @Security     BasicAuth
+// @Router       /files/{id}/metadata [patch]
+func (h *FileHandler) PatchMetadata(c *gin.Context) {
+	val, ok := c.Get("user")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "unauthorized"})
+		return
+	}
+	dbUser := val.(*user.User)
+	fileID := c.Param("id")
+
+	var req contract.UpdateFileMetadataRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, contract.ErrorResponse{Error: err.Error()})
+		return
+	}
+	if req.Filename == nil && req.Description == nil && req.GroupIDs == nil && req.Tags == nil {
+		c.JSON(http.StatusBadRequest, contract.ErrorResponse{Error: "at least one field is required"})
+		return
+	}
+
+	record, err := h.fileUsecase.UpdateMetadata(c.Request.Context(), dbUser.ID, fileID, req.Filename, req.Description, req.GroupIDs, req.Tags)
+	if err != nil {
+		if errors.Is(err, file.ErrFileNotFound) {
+			c.JSON(http.StatusNotFound, contract.ErrorResponse{Error: err.Error()})
+			return
+		}
+		if errors.Is(err, file.ErrAccessDenied) {
+			c.JSON(http.StatusForbidden, contract.ErrorResponse{Error: err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, contract.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, record)
 }
 
 // Delete deletes a file.
@@ -237,17 +344,17 @@ func (h *FileHandler) GetMetadata(c *gin.Context) {
 // @Tags         files
 // @Produce      json
 // @Param        id    path      string  true  "File ID"
-// @Success      200   {object}  map[string]interface{} "Message and physical_deleted status"
-// @Failure      401   {object}  map[string]string "Unauthorized"
-// @Failure      403   {object}  map[string]string "Forbidden (access denied)"
-// @Failure      404   {object}  map[string]string "File not found"
-// @Failure      500   {object}  map[string]string "Delete error"
+// @Success      200   {object}  contract.DeleteResponse "Message and physical_deleted status"
+// @Failure      401   {object}  contract.ErrorResponse "Unauthorized"
+// @Failure      403   {object}  contract.ErrorResponse "Forbidden (access denied)"
+// @Failure      404   {object}  contract.ErrorResponse "File not found"
+// @Failure      500   {object}  contract.ErrorResponse "Delete error"
 // @Security     BasicAuth
 // @Router       /files/{id} [delete]
 func (h *FileHandler) Delete(c *gin.Context) {
 	val, ok := c.Get("user")
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "unauthorized"})
 		return
 	}
 	dbUser := val.(*user.User)
@@ -256,20 +363,20 @@ func (h *FileHandler) Delete(c *gin.Context) {
 	physicalDeleted, err := h.fileUsecase.Delete(c.Request.Context(), dbUser.ID, fileID)
 	if err != nil {
 		if errors.Is(err, file.ErrFileNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			c.JSON(http.StatusNotFound, contract.ErrorResponse{Error: err.Error()})
 			return
 		}
 		if errors.Is(err, file.ErrAccessDenied) {
-			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			c.JSON(http.StatusForbidden, contract.ErrorResponse{Error: err.Error()})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete error"})
+		c.JSON(http.StatusInternalServerError, contract.ErrorResponse{Error: "delete error"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":          "file deleted successfully",
-		"physical_deleted": physicalDeleted,
+	c.JSON(http.StatusOK, contract.DeleteResponse{
+		Message:         "file deleted successfully",
+		PhysicalDeleted: physicalDeleted,
 	})
 }
 
@@ -282,23 +389,23 @@ func (h *FileHandler) Delete(c *gin.Context) {
 // @Param        limit          query     int     false  "Max search results limit (default 5)"
 // @Param        nlp_expansion  query     bool    false  "Enable NLP semantic search query expansion"
 // @Param        expansion_num  query     int     false  "Number of alternative queries to generate (default 3)"
-// @Success      200    {array}   contract.SearchResponseItem
-// @Failure      400    {object}  map[string]string "Missing query parameter 'q'"
-// @Failure      401    {object}  map[string]string "Unauthorized"
-// @Failure      500    {object}  map[string]string "Search failed"
+// @Success      200    {object}  contract.SearchListResponse
+// @Failure      400    {object}  contract.ErrorResponse "Missing query parameter 'q'"
+// @Failure      401    {object}  contract.ErrorResponse "Unauthorized"
+// @Failure      500    {object}  contract.ErrorResponse "Search failed"
 // @Security     BasicAuth
 // @Router       /files/search [get]
 func (h *FileHandler) Search(c *gin.Context) {
 	val, ok := c.Get("user")
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, contract.ErrorResponse{Error: "unauthorized"})
 		return
 	}
 	dbUser := val.(*user.User)
 
 	query := c.Query("q")
 	if query == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "query parameter 'q' is required"})
+		c.JSON(http.StatusBadRequest, contract.ErrorResponse{Error: "query parameter 'q' is required"})
 		return
 	}
 
@@ -325,9 +432,13 @@ func (h *FileHandler) Search(c *gin.Context) {
 
 	items, err := h.fileUsecase.Search(c.Request.Context(), dbUser.ID, query, limit, nlpExpansion, expansionNum)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "search failed"})
+		c.JSON(http.StatusInternalServerError, contract.ErrorResponse{Error: "search failed"})
 		return
 	}
 
-	c.JSON(http.StatusOK, items)
+	nlpEnabled := nlpExpansion && viper.GetBool("llm.query_expansion.enabled")
+	c.JSON(http.StatusOK, contract.SearchListResponse{
+		NLPExpansion: nlpEnabled,
+		Items:        items,
+	})
 }

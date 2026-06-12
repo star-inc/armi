@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha3"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,13 +13,12 @@ import (
 	"sync"
 
 	"github.com/go-ego/gse"
+	"github.com/star-inc/armi/internal/embedding"
+	"github.com/star-inc/armi/pkgs/contract"
+	"github.com/star-inc/armi/pkgs/file"
 	"github.com/rs/xid"
 	"github.com/spf13/viper"
-	"github.com/supersonictw/armi/internal/extractor"
-	"github.com/supersonictw/armi/pkgs/contract"
-	"github.com/supersonictw/armi/pkgs/file"
 )
-
 
 type FileUsecase struct {
 	fileRepo     file.FileRepository
@@ -41,12 +41,12 @@ func NewFileUsecase(
 	jobPublisher file.EmbeddingJobPublisher,
 ) *FileUsecase {
 	var segmenter *gse.Segmenter
-	seg, err := gse.New("zh")
+	seg, err := gse.NewEmbed("zh")
 	if err != nil {
 		slog.Warn("failed to initialize gse segmenter, word segmentation will be skipped", "error", err)
 	} else {
 		segmenter = &seg
-		slog.Info("Initialized gse segmenter successfully")
+		slog.Info("Initialized gse segmenter successfully (embed dictionary)")
 	}
 
 	return &FileUsecase{
@@ -63,16 +63,46 @@ func NewFileUsecase(
 
 func toFileResponse(f *file.FileRecord) contract.FileResponse {
 	return contract.FileResponse{
-		ID:          f.ID,
-		Filename:    f.Filename,
-		Hash:        f.Hash,
-		Size:        f.Size,
-		ContentType: f.ContentType,
-		OwnerID:     f.OwnerID,
-		Tags:        f.Tags,
-		CreatedAt:   f.CreatedAt,
-		UpdatedAt:   f.UpdatedAt,
+		ID:              f.ID,
+		Filename:        f.Filename,
+		Description:     f.Description,
+		Hash:            f.Hash,
+		Size:            f.Size,
+		ContentType:     f.ContentType,
+		AuthorID:        f.AuthorID,
+		GroupIDs:        f.GroupIDs,
+		Tags:            f.Tags,
+		EmbeddingStatus: f.EmbeddingStatus,
+		CreatedAt:       f.CreatedAt,
+		UpdatedAt:       f.UpdatedAt,
 	}
+}
+
+func buildStorageKey(sha3Hash string) string {
+	prefix := sha3Hash
+	if len(sha3Hash) >= 2 {
+		prefix = sha3Hash[:2]
+	}
+	return fmt.Sprintf("%s/%s", prefix, sha3Hash)
+}
+
+func (uc *FileUsecase) ensureGroupPermission(ctx context.Context, userID string, groupIDs []string, required file.GroupPermission) error {
+	if !viper.GetBool("auth.rbac.enabled") {
+		return nil
+	}
+	if len(groupIDs) == 0 {
+		return nil
+	}
+	for _, gid := range groupIDs {
+		perm, ok, err := uc.fileRepo.GetGroupPermission(ctx, userID, gid)
+		if err != nil {
+			return err
+		}
+		if ok && perm >= required {
+			return nil
+		}
+	}
+	return file.ErrAccessDenied
 }
 
 // Upload handles progress reporting, conflict check, physical saving, DB entry and vector embedding.
@@ -80,6 +110,8 @@ func (uc *FileUsecase) Upload(
 	ctx context.Context,
 	userID string,
 	filename string,
+	description string,
+	groupIDs []string,
 	contentType string,
 	content []byte,
 	transferID string,
@@ -93,34 +125,42 @@ func (uc *FileUsecase) Upload(
 	sha3Hash := hex.EncodeToString(hasher.Sum(nil))
 
 	// Check if this file already exists for this user (conflict)
-	conflictCount, err := uc.fileRepo.CountByFilenameOrHash(ctx, userID, filename, sha3Hash)
+	existingRecord, err := uc.fileRepo.GetByFilenameOrHash(ctx, userID, filename, sha3Hash)
 	if err != nil {
 		slog.Error("failed to check for file conflict", "error", err)
 		return nil, err
 	}
-	if conflictCount > 0 {
-		slog.Warn("file conflict detected on upload", "filename", filename, "hash", sha3Hash, "user_id", userID)
+	if existingRecord != nil {
+		slog.Warn("file conflict detected on upload", "filename", filename, "hash", sha3Hash, "user_id", userID, "conflicting_id", existingRecord.ID, "conflicting_hash", existingRecord.Hash)
 		uc.publisher.PublishEvent(ctx, "file.conflict", userID, map[string]interface{}{
-			"filename": filename,
-			"hash":     sha3Hash,
-			"reason":   "file with same name or content already exists for this user",
+			"filename":         filename,
+			"hash":             sha3Hash,
+			"conflicting_id":   existingRecord.ID,
+			"conflicting_hash": existingRecord.Hash,
+			"reason":           "file with same name or content already exists for this user",
 		})
-		return nil, file.ErrFileConflict
+		return nil, &file.ConflictError{
+			ConflictingFileID:   existingRecord.ID,
+			ConflictingFileHash: existingRecord.Hash,
+		}
 	}
 
-	// Check global reference count for physical file deduplication
-	globalCount, err := uc.fileRepo.CountByHash(ctx, sha3Hash)
+	// Lock and increment the reference count in DB safely
+	refCount, err := uc.fileRepo.GetOrCreateHashRecord(ctx, sha3Hash)
 	if err != nil {
-		slog.Error("failed to perform global file lookup", "error", err)
+		slog.Error("failed to update hash reference count", "hash", sha3Hash, "error", err)
 		return nil, err
 	}
 
-	key := "sha3-256-" + sha3Hash
+	globalCount := refCount - 1
+	key := buildStorageKey(sha3Hash)
+
 	if globalCount == 0 {
 		// Save physical file
 		err = uc.storage.Write(ctx, key, content)
 		if err != nil {
 			slog.Error("failed to write file to storage", "key", key, "error", err)
+			_, _ = uc.fileRepo.DecrementHashRecord(ctx, sha3Hash)
 			uc.publisher.PublishEvent(ctx, "system.storage_error", userID, map[string]interface{}{
 				"operation": "write",
 				"path":      key,
@@ -137,18 +177,61 @@ func (uc *FileUsecase) Upload(
 	// Insert database record
 	fileID := xid.New().String()
 	newRecord := &file.FileRecord{
-		ID:          fileID,
-		Filename:    filename,
-		Hash:        sha3Hash,
-		Size:        totalBytes,
-		ContentType: contentType,
-		OwnerID:     userID,
-		Tags:        tags,
+		ID:              fileID,
+		Filename:        filename,
+		Description:     description,
+		Hash:            sha3Hash,
+		Size:            totalBytes,
+		ContentType:     contentType,
+		AuthorID:        userID,
+		GroupIDs:        groupIDs,
+		Tags:            tags,
+		EmbeddingStatus: "pending",
 	}
 
-	err = uc.fileRepo.Create(ctx, newRecord)
+	if err := uc.ensureGroupPermission(ctx, userID, groupIDs, file.GroupPermissionWrite); err != nil {
+		newRefCount, _ := uc.fileRepo.DecrementHashRecord(ctx, sha3Hash)
+		if newRefCount == 0 {
+			_ = uc.storage.Delete(ctx, key)
+		}
+		return nil, err
+	}
+
+	var outboxPayload string
+	var useOutbox bool
+	if uc.jobPublisher != nil && uc.jobPublisher.IsAvailable() {
+		useOutbox = true
+		job := contract.EmbeddingJob{
+			JobID:       xid.New().String(),
+			FileID:      fileID,
+			UserID:      userID,
+			StorageKey:  key,
+			Filename:    filename,
+			ContentType: contentType,
+		}
+		if globalCount > 0 {
+			existing, err := uc.fileRepo.GetByHash(ctx, sha3Hash)
+			if err == nil && existing != nil {
+				job.IsCopy = true
+				job.SrcFileID = existing.ID
+			}
+		}
+		payloadBytes, _ := json.Marshal(job)
+		outboxPayload = string(payloadBytes)
+	}
+
+	if useOutbox {
+		err = uc.fileRepo.CreateWithOutbox(ctx, newRecord, outboxPayload)
+	} else {
+		err = uc.fileRepo.Create(ctx, newRecord)
+	}
+
 	if err != nil {
 		slog.Error("failed to create file record", "error", err)
+		newRefCount, _ := uc.fileRepo.DecrementHashRecord(ctx, sha3Hash)
+		if newRefCount == 0 {
+			_ = uc.storage.Delete(ctx, key)
+		}
 		uc.publisher.PublishEvent(ctx, "system.db_error", userID, map[string]interface{}{
 			"operation": "create file record",
 			"error":     err.Error(),
@@ -156,31 +239,33 @@ func (uc *FileUsecase) Upload(
 		return nil, err
 	}
 
-	// Vector Embedding — async via RabbitMQ when available, sync fallback otherwise.
-	if uc.jobPublisher != nil && uc.jobPublisher.IsAvailable() {
-		uc.dispatchEmbeddingJob(ctx, fileID, userID, sha3Hash, filename, contentType, globalCount)
-	} else {
-		if embedErr := uc.embedSync(ctx, fileID, userID, sha3Hash, filename, contentType, content, globalCount); embedErr != nil {
-			slog.Error("embedding failed (sync), rolling back file record", "file_id", fileID, "error", embedErr)
-			uc.publisher.PublishEvent(ctx, "embedding.failed", userID, map[string]interface{}{
-				"file_id": fileID,
-				"error":   embedErr.Error(),
-			})
-			// Roll back: delete the DB record so the upload appears as if it never happened.
-			if delErr := uc.fileRepo.Delete(ctx, fileID); delErr != nil {
-				slog.Error("failed to roll back file record after embedding error", "file_id", fileID, "error", delErr)
-			}
-			// Roll back vectors from vector database
-			if vecDelErr := uc.vectorDB.Delete(ctx, fileID); vecDelErr != nil {
-				slog.Error("failed to roll back vectors after embedding error", "file_id", fileID, "error", vecDelErr)
-			}
-			// Roll back physical file if it was newly created
-			if globalCount == 0 {
-				if storeDelErr := uc.storage.Delete(ctx, "sha3-256-"+sha3Hash); storeDelErr != nil {
-					slog.Error("failed to roll back physical file after embedding error", "key", "sha3-256-"+sha3Hash, "error", storeDelErr)
+	// Asynchronous dispatch (best-effort immediate dispatch, otherwise dispatcher catches it)
+	if useOutbox {
+		var job contract.EmbeddingJob
+		_ = json.Unmarshal([]byte(outboxPayload), &job)
+		
+		slog.Info("embedding job queued via outbox", "job_id", job.JobID, "file_id", fileID)
+		uc.publisher.PublishEvent(ctx, "embedding.queued", userID, map[string]interface{}{
+			"job_id":  job.JobID,
+			"file_id": fileID,
+		})
+
+		go func() {
+			bgCtx := context.Background()
+			if err := uc.jobPublisher.PublishEmbeddingJob(bgCtx, job); err == nil {
+				if delErr := uc.fileRepo.DeleteOutboxJobByFileID(bgCtx, fileID); delErr != nil {
+					slog.Warn("failed to delete outbox job after immediate dispatch", "file_id", fileID, "error", delErr)
 				}
 			}
-			return nil, fmt.Errorf("embedding failed: %w", embedErr)
+		}()
+	} else {
+		// Vector Embedding sync fallback
+		newRecord.EmbeddingStatus, err = uc.embedSync(
+			ctx, fileID, userID, sha3Hash, filename, contentType, content, globalCount,
+		)
+		if err != nil {
+			uc.rollbackUpload(ctx, fileID, userID, sha3Hash, globalCount, err)
+			return nil, fmt.Errorf("sync embedding failed: %w", err)
 		}
 	}
 
@@ -196,23 +281,23 @@ func (uc *FileUsecase) Upload(
 	return &resp, nil
 }
 
-// dispatchEmbeddingJob enqueues an EmbeddingJob to the RabbitMQ work queue.
+// dispatchEmbeddingJob enqueues an EmbeddingJob to the RabbitMQ work queue directly.
 func (uc *FileUsecase) dispatchEmbeddingJob(
 	ctx context.Context,
 	fileID, userID, sha3Hash, filename, contentType string,
+	content []byte,
 	globalCount int64,
-) {
+) (string, error) {
 	job := contract.EmbeddingJob{
 		JobID:       xid.New().String(),
 		FileID:      fileID,
 		UserID:      userID,
-		StorageKey:  "sha3-256-" + sha3Hash,
+		StorageKey:  buildStorageKey(sha3Hash),
 		Filename:    filename,
 		ContentType: contentType,
 	}
 
 	if globalCount > 0 {
-		// Deduplication: look up the existing record's ID so the consumer can Copy.
 		existing, err := uc.fileRepo.GetByHash(ctx, sha3Hash)
 		if err == nil && existing != nil {
 			job.IsCopy = true
@@ -226,9 +311,7 @@ func (uc *FileUsecase) dispatchEmbeddingJob(
 			"job_id": job.JobID,
 			"error":  err.Error(),
 		})
-		// Sync fallback: content is no longer available here, skip silently.
-		// The file is still saved; embedding can be retried later.
-		return
+		return uc.embedSync(ctx, fileID, userID, sha3Hash, filename, contentType, content, globalCount)
 	}
 
 	slog.Info("embedding job enqueued", "job_id", job.JobID, "file_id", fileID)
@@ -236,16 +319,43 @@ func (uc *FileUsecase) dispatchEmbeddingJob(
 		"job_id":  job.JobID,
 		"file_id": fileID,
 	})
+	return "pending", nil
+}
+
+func (uc *FileUsecase) rollbackUpload(
+	ctx context.Context,
+	fileID, userID, sha3Hash string,
+	globalCount int64,
+	embeddingErr error,
+) {
+	slog.Error("embedding failed, rolling back upload", "file_id", fileID, "error", embeddingErr)
+	uc.publisher.PublishEvent(ctx, "embedding.failed", userID, map[string]interface{}{
+		"file_id": fileID,
+		"error":   embeddingErr.Error(),
+	})
+	if delErr := uc.fileRepo.Delete(ctx, fileID); delErr != nil {
+		slog.Error("failed to roll back file record after embedding error", "file_id", fileID, "error", delErr)
+	}
+	if vecDelErr := uc.vectorDB.Delete(ctx, fileID); vecDelErr != nil {
+		slog.Error("failed to roll back vectors after embedding error", "file_id", fileID, "error", vecDelErr)
+	}
+	newRefCount, _ := uc.fileRepo.DecrementHashRecord(ctx, sha3Hash)
+	if newRefCount == 0 {
+		key := buildStorageKey(sha3Hash)
+		if storeDelErr := uc.storage.Delete(ctx, key); storeDelErr != nil {
+			slog.Error("failed to roll back physical file after embedding error", "key", key, "error", storeDelErr)
+		}
+	}
 }
 
 // embedSync performs embedding in the same goroutine (used when RabbitMQ is unavailable).
-// Returns an error if embedding fails; the caller is responsible for rolling back the upload.
+// Returns the status ("completed" or "skipped") and an error if embedding fails.
 func (uc *FileUsecase) embedSync(
 	ctx context.Context,
 	fileID, userID, sha3Hash, filename, contentType string,
 	content []byte,
 	globalCount int64,
-) error {
+) (string, error) {
 	var vectorCopied bool
 	if globalCount > 0 {
 		existingRecord, err := uc.fileRepo.GetByHash(ctx, sha3Hash)
@@ -262,66 +372,32 @@ func (uc *FileUsecase) embedSync(
 	if !vectorCopied {
 		text, extractErr := uc.extractTextFromContent(ctx, content, filename)
 		if extractErr != nil {
-			return extractErr
+			return "", extractErr
 		}
 		if text == "" {
 			// No extractable text — not a fatal error, skip silently.
-			return nil
+			uc.updateEmbeddingStatus(ctx, fileID, "skipped")
+			return "skipped", nil
 		}
 
-		chunkSize := viper.GetInt("chunk.size")
-		if chunkSize <= 0 {
-			chunkSize = 1000
-		}
-		chunkOverlap := viper.GetInt("chunk.overlap")
-		if chunkOverlap < 0 {
-			chunkOverlap = 200
-		}
-
-		chunks := extractor.SplitText(text, chunkSize, chunkOverlap)
-		for i, chunk := range chunks {
-			embeddingVal, embedErr := uc.embedder.Embed(ctx, chunk)
-			if embedErr != nil {
-				slog.Error("embedding provider error (sync)", "file_id", fileID, "chunk_index", i, "error", embedErr)
-				return fmt.Errorf("embedding model error at chunk %d: %w", i, embedErr)
-			}
-			if err := uc.vectorDB.Insert(ctx, fileID, i, chunk, embeddingVal); err != nil {
-				return fmt.Errorf("vector insert failed at chunk %d: %w", i, err)
-			}
+		if err := embedding.EmbedTextChunks(ctx, fileID, text, uc.embedder, uc.vectorDB); err != nil {
+			slog.Error("embedding failed (sync)", "file_id", fileID, "error", err)
+			return "", err
 		}
 	}
-	return nil
+	uc.updateEmbeddingStatus(ctx, fileID, "completed")
+	return "completed", nil
 }
 
 // extractTextFromContent processes raw bytes of a file to extract text, falling back to OCR if needed.
 func (uc *FileUsecase) extractTextFromContent(ctx context.Context, content []byte, filename string) (string, error) {
-	text, extractErr := extractor.ExtractText(content, filename)
-	if extractErr != nil {
-		return "", fmt.Errorf("text extraction failed: %w", extractErr)
+	return embedding.ExtractTextWithOCR(ctx, content, filename, uc.llm)
+}
+
+func (uc *FileUsecase) updateEmbeddingStatus(ctx context.Context, fileID string, status string) {
+	if err := uc.fileRepo.UpdateEmbeddingStatus(ctx, fileID, status); err != nil {
+		slog.Error("failed to update embedding status in database", "file_id", fileID, "status", status, "error", err)
 	}
-	if text == "" && uc.llm != nil {
-		lowerFilename := strings.ToLower(filename)
-		if strings.HasSuffix(lowerFilename, ".pdf") {
-			slog.Info("Extracted text is empty, trying OCR on PDF pages", "filename", filename)
-			ocrText, ocrErr := extractor.PerformOCRForPDF(ctx, content, uc.llm)
-			if ocrErr == nil && ocrText != "" {
-				text = ocrText
-				slog.Info("Successfully extracted text via PDF OCR", "filename", filename, "text_len", len(text))
-			} else if ocrErr != nil {
-				slog.Warn("PDF OCR fallback failed", "filename", filename, "error", ocrErr)
-			}
-		} else if strings.HasSuffix(lowerFilename, ".pptx") || strings.HasSuffix(lowerFilename, ".ppt") {
-			slog.Info("Extracted text is empty, trying OCR on PPTX embedded images", "filename", filename)
-			ocrText, ocrErr := extractor.PerformOCRForPPTX(ctx, content, uc.llm)
-			if ocrErr == nil && ocrText != "" {
-				text = ocrText
-				slog.Info("Successfully extracted text via PPTX OCR", "filename", filename, "text_len", len(text))
-			} else if ocrErr != nil {
-				slog.Warn("PPTX OCR fallback failed", "filename", filename, "error", ocrErr)
-			}
-		}
-	}
-	return text, nil
 }
 
 // ExtractText fetches file content (verifying ownership) and extracts text using OCR fallback when necessary.
@@ -333,18 +409,40 @@ func (uc *FileUsecase) ExtractText(ctx context.Context, userID string, fileID st
 	return uc.extractTextFromContent(ctx, data, filename)
 }
 
-func (uc *FileUsecase) List(ctx context.Context, userID string, tag string) ([]contract.FileResponse, error) {
-	files, err := uc.fileRepo.ListByOwnerID(ctx, userID, tag)
+func (uc *FileUsecase) ListPaginated(ctx context.Context, userID string, tag string, page int, pageSize int) (*contract.FileListResponse, error) {
+	offset := (page - 1) * pageSize
+	var (
+		files []*file.FileRecord
+		total int64
+		err   error
+	)
+	if viper.GetBool("auth.rbac.enabled") {
+		files, total, err = uc.fileRepo.ListAccessible(ctx, userID, tag, file.GroupPermissionRead, pageSize, offset)
+	} else {
+		files, total, err = uc.fileRepo.List(ctx, tag, pageSize, offset)
+	}
 	if err != nil {
-		slog.Error("failed to list user files", "user_id", userID, "error", err)
+		slog.Error("failed to list user files with pagination", "user_id", userID, "page", page, "page_size", pageSize, "error", err)
 		return nil, err
 	}
 
-	results := make([]contract.FileResponse, len(files))
-	for i, f := range files {
-		results[i] = toFileResponse(f)
+	items := make([]contract.FileResponse, 0, len(files))
+	for _, f := range files {
+		items = append(items, toFileResponse(f))
 	}
-	return results, nil
+
+	totalPages := 0
+	if total > 0 {
+		totalPages = int((total + int64(pageSize) - 1) / int64(pageSize))
+	}
+
+	return &contract.FileListResponse{
+		Items:      items,
+		Total:      total,
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+	}, nil
 }
 
 func (uc *FileUsecase) Download(ctx context.Context, userID string, fileID string) ([]byte, string, string, int64, error) {
@@ -355,13 +453,11 @@ func (uc *FileUsecase) Download(ctx context.Context, userID string, fileID strin
 	if record == nil {
 		return nil, "", "", 0, file.ErrFileNotFound
 	}
-
-	// Verify ownership
-	if record.OwnerID != userID {
-		return nil, "", "", 0, file.ErrAccessDenied
+	if err := uc.ensureGroupPermission(ctx, userID, record.GroupIDs, file.GroupPermissionRead); err != nil {
+		return nil, "", "", 0, err
 	}
 
-	key := "sha3-256-" + record.Hash
+	key := buildStorageKey(record.Hash)
 	data, err := uc.storage.Read(ctx, key)
 	if err != nil {
 		slog.Error("failed to read file from storage", "key", key, "error", err)
@@ -382,7 +478,7 @@ func (uc *FileUsecase) Download(ctx context.Context, userID string, fileID strin
 	return data, record.Filename, record.ContentType, record.Size, nil
 }
 
-func (uc *FileUsecase) GetMetadata(ctx context.Context, userID string, fileID string) (*contract.FileResponse, map[string]interface{}, error) {
+func (uc *FileUsecase) GetMetadata(ctx context.Context, userID string, fileID string) (*contract.FileResponse, *contract.StorageMetadataResponse, error) {
 	record, err := uc.fileRepo.GetByID(ctx, fileID)
 	if err != nil {
 		return nil, nil, err
@@ -390,21 +486,19 @@ func (uc *FileUsecase) GetMetadata(ctx context.Context, userID string, fileID st
 	if record == nil {
 		return nil, nil, file.ErrFileNotFound
 	}
-
-	// Verify ownership
-	if record.OwnerID != userID {
-		return nil, nil, file.ErrAccessDenied
+	if err := uc.ensureGroupPermission(ctx, userID, record.GroupIDs, file.GroupPermissionRead); err != nil {
+		return nil, nil, err
 	}
 
-	key := "sha3-256-" + record.Hash
+	key := buildStorageKey(record.Hash)
 	stat, err := uc.storage.Stat(ctx, key)
-	opMetadata := make(map[string]interface{})
+	opMetadata := &contract.StorageMetadataResponse{}
 	if err != nil {
 		slog.Warn("failed to fetch storage metadata stat", "key", key, "error", err)
-		opMetadata["error"] = "storage status unavailable"
+		opMetadata.Error = "storage status unavailable"
 	} else {
-		opMetadata["content_length"] = stat.ContentLength
-		opMetadata["last_modified"] = stat.LastModified
+		opMetadata.ContentLength = stat.ContentLength
+		opMetadata.LastModified = stat.LastModified
 	}
 
 	uc.publisher.PublishEvent(ctx, "file.metadata_accessed", userID, map[string]interface{}{
@@ -416,6 +510,69 @@ func (uc *FileUsecase) GetMetadata(ctx context.Context, userID string, fileID st
 	return &resp, opMetadata, nil
 }
 
+func (uc *FileUsecase) UpdateMetadata(ctx context.Context, userID string, fileID string, filename *string, description *string, groupIDs []string, tags []string) (*contract.FileResponse, error) {
+	record, err := uc.fileRepo.GetByID(ctx, fileID)
+	if err != nil {
+		return nil, err
+	}
+	if record == nil {
+		return nil, file.ErrFileNotFound
+	}
+	if err := uc.ensureGroupPermission(ctx, userID, record.GroupIDs, file.GroupPermissionWrite); err != nil {
+		return nil, err
+	}
+	if filename != nil {
+		newName := strings.TrimSpace(*filename)
+		if newName == "" {
+			return nil, errors.New("filename cannot be empty")
+		}
+		record.Filename = newName
+	}
+	if description != nil {
+		record.Description = strings.TrimSpace(*description)
+	}
+	if groupIDs != nil {
+		cleanedGroupIDs := make([]string, 0, len(groupIDs))
+		for _, gid := range groupIDs {
+			trimmed := strings.TrimSpace(gid)
+			if trimmed != "" {
+				cleanedGroupIDs = append(cleanedGroupIDs, trimmed)
+			}
+		}
+		if err := uc.ensureGroupPermission(ctx, userID, record.GroupIDs, file.GroupPermissionManage); err != nil {
+			return nil, err
+		}
+		if err := uc.ensureGroupPermission(ctx, userID, cleanedGroupIDs, file.GroupPermissionManage); err != nil {
+			return nil, err
+		}
+		record.GroupIDs = cleanedGroupIDs
+	}
+	if tags != nil {
+		cleaned := make([]string, 0, len(tags))
+		for _, t := range tags {
+			trimmed := strings.TrimSpace(t)
+			if trimmed != "" {
+				cleaned = append(cleaned, trimmed)
+			}
+		}
+		record.Tags = cleaned
+	}
+
+	if err := uc.fileRepo.Update(ctx, record); err != nil {
+		return nil, err
+	}
+
+	uc.publisher.PublishEvent(ctx, "file.metadata_updated", userID, map[string]interface{}{
+		"file_id":     record.ID,
+		"filename":    record.Filename,
+		"description": record.Description,
+		"tags":        record.Tags,
+	})
+
+	resp := toFileResponse(record)
+	return &resp, nil
+}
+
 func (uc *FileUsecase) Delete(ctx context.Context, userID string, fileID string) (bool, error) {
 	record, err := uc.fileRepo.GetByID(ctx, fileID)
 	if err != nil {
@@ -424,61 +581,81 @@ func (uc *FileUsecase) Delete(ctx context.Context, userID string, fileID string)
 	if record == nil {
 		return false, file.ErrFileNotFound
 	}
-
-	// Verify ownership
-	if record.OwnerID != userID {
-		return false, file.ErrAccessDenied
+	if err := uc.ensureGroupPermission(ctx, userID, record.GroupIDs, file.GroupPermissionManage); err != nil {
+		return false, err
 	}
 
-	// Delete DB Record
-	err = uc.fileRepo.Delete(ctx, fileID)
+	// Decrement the reference count safely
+	newRefCount, err := uc.fileRepo.DecrementHashRecord(ctx, record.Hash)
 	if err != nil {
-		slog.Error("failed to delete file record from repository", "file_id", fileID, "error", err)
+		return false, fmt.Errorf("decrement hash record: %w", err)
+	}
+
+	deletePhysical := (newRefCount == 0)
+	key := buildStorageKey(record.Hash)
+
+	// Create cleanup job and delete file record atomically in a transaction
+	cleanupJob := &file.CleanupJob{
+		ID:             xid.New().String(),
+		FileID:         fileID,
+		Hash:           record.Hash,
+		StorageKey:     key,
+		DeletePhysical: deletePhysical,
+		Status:         "pending",
+	}
+
+	if err := uc.fileRepo.DeleteWithCleanup(ctx, fileID, cleanupJob); err != nil {
+		// Compensate: re-increment reference count if deletion registration fails
+		_, _ = uc.fileRepo.GetOrCreateHashRecord(ctx, record.Hash)
 		uc.publisher.PublishEvent(ctx, "system.db_error", userID, map[string]interface{}{
 			"operation": "delete file record",
 			"error":     err.Error(),
 		})
-		return false, err
+		return false, fmt.Errorf("failed to register file deletion: %w", err)
 	}
 
-	// Delete Vector point
-	if err = uc.vectorDB.Delete(ctx, fileID); err != nil {
-		slog.Error("failed to delete embedding from vector database", "file_id", fileID, "error", err)
-	}
-
-	// Check global reference count
-	otherCount, err := uc.fileRepo.CountByHash(ctx, record.Hash)
-	if err != nil {
-		slog.Error("failed to check other references for hash", "hash", record.Hash, "error", err)
-	}
-
-	var physicalDeleted bool
-	if otherCount == 0 {
-		key := "sha3-256-" + record.Hash
-		err = uc.storage.Delete(ctx, key)
-		if err != nil {
-			slog.Error("failed to delete physical file", "key", key, "error", err)
-			uc.publisher.PublishEvent(ctx, "system.storage_error", userID, map[string]interface{}{
-				"operation": "delete physical file",
-				"path":      key,
-				"error":     err.Error(),
-			})
-		} else {
-			physicalDeleted = true
-			uc.publisher.PublishEvent(ctx, "storage.physical_deleted", userID, map[string]interface{}{
-				"hash": record.Hash,
-			})
+	// Trigger immediate background cleanup (best-effort)
+	go func() {
+		bgCtx := context.Background()
+		vecDelErr := uc.vectorDB.Delete(bgCtx, fileID)
+		var storeDelErr error
+		if deletePhysical {
+			// Double check active ref count
+			c, cErr := uc.fileRepo.CountByHash(bgCtx, record.Hash)
+			if cErr == nil && c == 0 {
+				storeDelErr = uc.storage.Delete(bgCtx, key)
+			}
 		}
-	}
+		if vecDelErr == nil && storeDelErr == nil {
+			_ = uc.fileRepo.DeleteCleanupJob(bgCtx, cleanupJob.ID)
+		}
+	}()
 
 	uc.publisher.PublishEvent(ctx, "file.deleted", userID, map[string]interface{}{
 		"file_id":          record.ID,
 		"filename":         record.Filename,
 		"hash":             record.Hash,
-		"physical_deleted": physicalDeleted,
+		"physical_deleted": deletePhysical,
 	})
 
-	return physicalDeleted, nil
+	return deletePhysical, nil
+}
+
+func (uc *FileUsecase) restoreVector(ctx context.Context, record *file.FileRecord, content []byte) error {
+	if record.EmbeddingStatus != "completed" {
+		return nil
+	}
+	text, err := uc.extractTextFromContent(ctx, content, record.Filename)
+	if err != nil {
+		return fmt.Errorf("restore vector text extraction: %w", err)
+	}
+	if text == "" {
+		return nil
+	}
+	if err := embedding.EmbedTextChunks(ctx, record.ID, text, uc.embedder, uc.vectorDB); err != nil {
+		return fmt.Errorf("restore vector: %w", err)
+	}
+	return nil
 }
 
 func (uc *FileUsecase) Search(
@@ -496,9 +673,9 @@ func (uc *FileUsecase) Search(
 	var targetQueries []string
 	targetQueries = append(targetQueries, query)
 
-	nlpEnabledGlobal := viper.GetBool("search.nlp_expansion.enabled")
+	nlpEnabledGlobal := viper.GetBool("llm.query_expansion.enabled")
 	if nlpExpansion && nlpEnabledGlobal && uc.llm != nil {
-		maxLimit := viper.GetInt("search.nlp_expansion.max_limit")
+		maxLimit := viper.GetInt("llm.query_expansion.max_limit")
 		if maxLimit <= 0 {
 			maxLimit = 10
 		}
@@ -581,7 +758,10 @@ func (uc *FileUsecase) Search(
 					fileCache[res.FileID] = r
 					mu.Unlock()
 				}
-				if r == nil || r.OwnerID != userID {
+				if r == nil {
+					continue
+				}
+				if err := uc.ensureGroupPermission(ctx, userID, r.GroupIDs, file.GroupPermissionRead); err != nil {
 					continue
 				}
 
@@ -623,21 +803,12 @@ func (uc *FileUsecase) Search(
 	var responseItems []contract.SearchResponseItem
 	for _, c := range candidatesList {
 		responseItems = append(responseItems, contract.SearchResponseItem{
-			FileResponse: contract.FileResponse{
-				ID:          c.record.ID,
-				Filename:    c.record.Filename,
-				Hash:        c.record.Hash,
-				Size:        c.record.Size,
-				ContentType: c.record.ContentType,
-				OwnerID:     c.record.OwnerID,
-				CreatedAt:   c.record.CreatedAt,
-				UpdatedAt:   c.record.UpdatedAt,
-			},
-			Distance:    c.distance,
-			Score:       c.score,
-			SourceQuery: c.sourceQuery,
-			ChunkID:     c.chunkID,
-			ChunkText:   c.chunkText,
+			FileResponse: toFileResponse(c.record),
+			Distance:     c.distance,
+			Score:        c.score,
+			SourceQuery:  c.sourceQuery,
+			ChunkID:      c.chunkID,
+			ChunkText:    c.chunkText,
 		})
 	}
 
