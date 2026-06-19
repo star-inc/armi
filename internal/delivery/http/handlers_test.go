@@ -90,7 +90,7 @@ func setupTestEnv(t *testing.T) *Server {
 	fileRepo := database.NewGormFileRepository(db)
 
 	userUsecase := usecase.NewUserUsecase(userRepo, publisher)
-	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher, nil)
+	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher, nil, nil)
 
 	return NewServer(userUsecase, fileUsecase, publisher, jwtauth.AuthSchemeBasic, nil, NewEventsHub())
 }
@@ -470,7 +470,7 @@ func TestRegisterDisabledWhenBearerOnly(t *testing.T) {
 	fileRepo := database.NewGormFileRepository(db)
 
 	userUsecase := usecase.NewUserUsecase(userRepo, publisher)
-	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher, nil)
+	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher, nil, nil)
 	server := NewServer(userUsecase, fileUsecase, publisher, jwtauth.AuthSchemeBearer, nil, NewEventsHub())
 
 	regPayload := map[string]string{

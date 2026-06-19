@@ -12,9 +12,11 @@ import (
 	"github.com/star-inc/armi/internal/infrastructure/jwtauth"
 	"github.com/star-inc/armi/internal/infrastructure/llm"
 	"github.com/star-inc/armi/internal/infrastructure/rabbitmq"
+	"github.com/star-inc/armi/internal/infrastructure/rerank"
 	"github.com/star-inc/armi/internal/infrastructure/storage"
 	"github.com/star-inc/armi/internal/infrastructure/vector"
 	"github.com/star-inc/armi/internal/usecase"
+	"github.com/star-inc/armi/pkgs/file"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -112,9 +114,19 @@ func runServe() error {
 	userRepo := database.NewGormUserRepository(db)
 	fileRepo := database.NewGormFileRepository(db)
 
+	// 7.5 Initialize Reranker (optional)
+	var reranker file.Reranker
+	if viper.GetBool("rerank.enabled") {
+		var err error
+		reranker, err = rerank.NewReranker()
+		if err != nil {
+			log.Fatalf("failed to initialize reranker: %v", err)
+		}
+	}
+
 	// 8. Instantiate Use Cases (Business Logic Layers)
 	userUsecase := usecase.NewUserUsecase(userRepo, publisher)
-	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher, jobPublisher)
+	fileUsecase := usecase.NewFileUsecase(fileRepo, store, embedder, vectorDB, llmService, publisher, jobPublisher, reranker)
 
 	// 9. Initialize JWT Verifier (optional — skipped when jwt.issuer is not configured)
 	authScheme := jwtauth.ParseAuthScheme(viper.GetString("auth.scheme"))

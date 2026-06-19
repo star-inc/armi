@@ -84,6 +84,14 @@ func InitConfig() {
 	viper.SetDefault("llm.openai.api_key", "")
 	viper.SetDefault("llm.openai.base_url", "https://api.portkey.ai/v1")
 
+	// Rerank Defaults
+	viper.SetDefault("rerank.enabled", false)
+	viper.SetDefault("rerank.provider", "llamacpp")
+	viper.SetDefault("rerank.model", "bge-reranker-v2-m3")
+	viper.SetDefault("rerank.api_key", "")
+	viper.SetDefault("rerank.base_url", "")
+	viper.SetDefault("rerank.query_limit", 0)
+
 	// GSE Defaults
 	viper.SetDefault("gse.dict_embed", "zh")
 	viper.SetDefault("gse.dict_paths", []string{})

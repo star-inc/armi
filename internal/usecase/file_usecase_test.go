@@ -214,7 +214,7 @@ func TestNewFileUsecaseGseConfig(t *testing.T) {
 	viper.Set("gse.dict_paths", []string{tempFile})
 
 	// Initialize FileUsecase
-	uc := NewFileUsecase(nil, nil, nil, nil, nil, nil, nil)
+	uc := NewFileUsecase(nil, nil, nil, nil, nil, nil, nil, nil)
 	if uc.segmenter == nil {
 		t.Fatal("expected segmenter to be initialized, got nil")
 	}
@@ -229,5 +229,82 @@ func TestNewFileUsecaseGseConfig(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected custom word '自定義分詞' to be segmented, got words: %v", words)
+	}
+}
+
+type mockReranker struct {
+	called bool
+	query  string
+	docs   []string
+	result []file.RerankResult
+}
+
+func (m *mockReranker) Rerank(ctx context.Context, query string, documents []string) ([]file.RerankResult, error) {
+	m.called = true
+	m.query = query
+	m.docs = documents
+	return m.result, nil
+}
+
+type mockSearchVectorDB struct {
+	fallbackVectorDB
+}
+
+func (m *mockSearchVectorDB) Search(context.Context, []float32, []string, int) ([]file.SearchResult, error) {
+	return []file.SearchResult{
+		{FileID: "file-1", ChunkID: "chunk-1", Text: "text-1", Distance: 0.1},
+		{FileID: "file-1", ChunkID: "chunk-2", Text: "text-2", Distance: 0.8},
+	}, nil
+}
+
+func TestSearchRerank(t *testing.T) {
+	origEnabled := viper.Get("rerank.enabled")
+	origLimit := viper.Get("rerank.query_limit")
+	defer func() {
+		viper.Set("rerank.enabled", origEnabled)
+		viper.Set("rerank.query_limit", origLimit)
+	}()
+
+	viper.Set("rerank.enabled", true)
+	viper.Set("rerank.query_limit", 5)
+
+	repo := &fallbackRepo{
+		record: &file.FileRecord{
+			ID:              "file-1",
+			Filename:        "doc1.txt",
+			AuthorID:        "user-1",
+			EmbeddingStatus: "completed",
+		},
+	}
+	embedder := fallbackEmbedder{}
+	vectorDB := &mockSearchVectorDB{}
+	publisher := fallbackPublisher{}
+
+	mRerank := &mockReranker{
+		result: []file.RerankResult{
+			{Index: 0, RelevanceScore: 0.1},
+			{Index: 1, RelevanceScore: 0.9},
+		},
+	}
+
+	uc := NewFileUsecase(repo, nil, embedder, vectorDB, nil, publisher, nil, mRerank)
+
+	results, err := uc.Search(context.Background(), "user-1", "test query", 2, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !mRerank.called {
+		t.Fatal("expected reranker to be called")
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	// Index 1 (chunk-2) has a relevance score of 0.9, so it should be first
+	if results[0].Score != 0.9 {
+		t.Fatalf("expected top result score to be 0.9, got %f", results[0].Score)
+	}
+	if results[0].ChunkID != "chunk-2" {
+		t.Fatalf("expected top result chunk ID to be chunk-2, got %s", results[0].ChunkID)
 	}
 }

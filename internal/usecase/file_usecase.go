@@ -29,6 +29,7 @@ type FileUsecase struct {
 	publisher    file.EventPublisher
 	jobPublisher file.EmbeddingJobPublisher // nil when RabbitMQ is unavailable
 	segmenter    *gse.Segmenter
+	reranker     file.Reranker
 }
 
 func NewFileUsecase(
@@ -39,6 +40,7 @@ func NewFileUsecase(
 	llm file.LLM,
 	publisher file.EventPublisher,
 	jobPublisher file.EmbeddingJobPublisher,
+	reranker file.Reranker,
 ) *FileUsecase {
 	var segmenter *gse.Segmenter
 	var seg gse.Segmenter
@@ -85,6 +87,7 @@ func NewFileUsecase(
 		publisher:    publisher,
 		jobPublisher: jobPublisher,
 		segmenter:    segmenter,
+		reranker:     reranker,
 	}
 }
 
@@ -775,6 +778,18 @@ func (uc *FileUsecase) Search(
 	mergedCandidates := make(map[string]candidate)
 	fileCache := make(map[string]*file.FileRecord)
 
+	queryLimit := limit
+	rerankEnabled := viper.GetBool("rerank.enabled") && uc.reranker != nil
+	if rerankEnabled {
+		queryLimit = viper.GetInt("rerank.query_limit")
+		if queryLimit <= 0 {
+			queryLimit = limit * 3
+		}
+		if queryLimit < limit {
+			queryLimit = limit
+		}
+	}
+
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
@@ -791,7 +806,7 @@ func (uc *FileUsecase) Search(
 			}
 
 			// Perform vector and keyword hybrid search
-			searchResults, err := uc.vectorDB.Search(ctx, queryEmbedding, keywords, limit)
+			searchResults, err := uc.vectorDB.Search(ctx, queryEmbedding, keywords, queryLimit)
 			if err != nil {
 				slog.Error("vector database search failed", "query", q, "error", err)
 				return
@@ -844,6 +859,25 @@ func (uc *FileUsecase) Search(
 	var candidatesList []candidate
 	for _, c := range mergedCandidates {
 		candidatesList = append(candidatesList, c)
+	}
+
+	if rerankEnabled && len(candidatesList) > 0 {
+		var documents []string
+		for _, c := range candidatesList {
+			documents = append(documents, c.chunkText)
+		}
+		rerankedResults, err := uc.reranker.Rerank(ctx, query, documents)
+		if err != nil {
+			slog.Error("reranking failed, falling back to vector database scores", "error", err)
+		} else {
+			// Update candidate scores with rerank relevance scores
+			for _, res := range rerankedResults {
+				if res.Index >= 0 && res.Index < len(candidatesList) {
+					candidatesList[res.Index].score = res.RelevanceScore
+					candidatesList[res.Index].distance = 1.0 - res.RelevanceScore
+				}
+			}
+		}
 	}
 
 	// Sort candidates by score descending
