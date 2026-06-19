@@ -162,6 +162,11 @@ func (s *SQLiteVectorDB) Search(ctx context.Context, embedding []float32, keywor
 		return nil, fmt.Errorf("rdbms database not initialized")
 	}
 
+	fallbackDistance := viper.GetFloat64("vector.keyword_search.fallback_distance")
+	if fallbackDistance <= 0 || fallbackDistance > 1 {
+		fallbackDistance = 0.5
+	}
+
 	serialized, serializeErr := sqlite_vec.SerializeFloat32(embedding)
 	if serializeErr != nil {
 		slog.Error("sqlite-vec serialization failed", "error", serializeErr)
@@ -237,8 +242,8 @@ func (s *SQLiteVectorDB) Search(ctx context.Context, embedding []float32, keywor
 				var res file.SearchResult
 				if err := kwRows.Scan(&res.FileID, &res.ChunkID, &res.Text); err == nil {
 					if !seenChunks[res.ChunkID] {
-						// Assign a distance of 0.5 for keyword-only matches
-						res.Distance = 0.5
+						// Calculate dynamic distance for keyword match
+						res.Distance = calculateKeywordDistance(res.Text, keywords, fallbackDistance)
 						results = append(results, res)
 						seenChunks[res.ChunkID] = true
 					}
@@ -519,6 +524,11 @@ func (q *QdrantVectorDB) Search(ctx context.Context, embedding []float32, keywor
 		return nil, fmt.Errorf("invalid qdrant url: %w", err)
 	}
 
+	fallbackDistance := viper.GetFloat64("vector.keyword_search.fallback_distance")
+	if fallbackDistance <= 0 || fallbackDistance > 1 {
+		fallbackDistance = 0.5
+	}
+
 	targetURL := base.JoinPath("collections", q.Collection, "points", "search").String()
 
 	reqBody := map[string]interface{}{
@@ -649,7 +659,7 @@ func (q *QdrantVectorDB) Search(ctx context.Context, embedding []float32, keywor
 										FileID:   p.Payload.FileID,
 										ChunkID:  p.Payload.ChunkID,
 										Text:     p.Payload.Text,
-										Distance: 0.5, // fallback distance
+										Distance: calculateKeywordDistance(p.Payload.Text, keywords, fallbackDistance),
 									})
 									seenChunks[p.Payload.ChunkID] = true
 								}
@@ -715,4 +725,38 @@ func (q *QdrantVectorDB) Delete(ctx context.Context, fileID string) error {
 // Close releases QdrantVectorDB resources.
 func (q *QdrantVectorDB) Close() error {
 	return nil
+}
+
+func calculateKeywordDistance(text string, keywords []string, fallbackDistance float64) float32 {
+	lowerText := strings.ToLower(text)
+	uniqueMatchCount := 0
+	totalOccurrences := 0
+	validKeywordsCount := 0
+
+	for _, kw := range keywords {
+		lowerKw := strings.ToLower(strings.TrimSpace(kw))
+		if lowerKw == "" {
+			continue
+		}
+		validKeywordsCount++
+		count := strings.Count(lowerText, lowerKw)
+		if count > 0 {
+			uniqueMatchCount++
+			totalOccurrences += count
+		}
+	}
+
+	if validKeywordsCount == 0 {
+		return float32(fallbackDistance)
+	}
+
+	matchingRatio := float32(uniqueMatchCount) / float32(validKeywordsCount)
+	var occurrenceScore float32 = 0.0
+	if totalOccurrences > 0 {
+		occurrenceScore = float32(totalOccurrences) / (float32(totalOccurrences) + 5.0)
+	}
+
+	baseSimilarity := float32(1.0 - fallbackDistance)
+	score := baseSimilarity + (1.0-baseSimilarity)*(0.7*matchingRatio+0.3*occurrenceScore)
+	return 1.0 - score
 }

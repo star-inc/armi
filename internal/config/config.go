@@ -59,6 +59,7 @@ func InitConfig() {
 	viper.SetDefault("vector.provider", "sqlite-vec")
 	viper.SetDefault("vector.qdrant.url", "http://localhost:6333")
 	viper.SetDefault("vector.qdrant.collection", "armi_files")
+	viper.SetDefault("vector.keyword_search.fallback_distance", 0.5)
 
 	// Chunk Defaults
 	viper.SetDefault("chunk.size", 1000)
