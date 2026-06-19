@@ -295,7 +295,7 @@ func (m *mockVectorDB) Insert(ctx context.Context, chunkID string, tokenCount in
 func (m *mockVectorDB) Copy(ctx context.Context, srcFileID string, destFileID string) error {
 	return nil
 }
-func (m *mockVectorDB) Search(ctx context.Context, queryVector []float32, keywords []string, limit int) ([]file.SearchResult, error) {
+func (m *mockVectorDB) Search(ctx context.Context, queryVector []float32, keywords []string, fileIDs []string, limit int) ([]file.SearchResult, error) {
 	return nil, nil
 }
 func (m *mockVectorDB) Delete(ctx context.Context, fileID string) error {

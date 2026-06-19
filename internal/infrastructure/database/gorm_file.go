@@ -229,7 +229,7 @@ func (r *GormFileRepository) List(ctx context.Context, tag string, limit int, of
 	return r.list(ctx, nil, tag, limit, offset)
 }
 
-// ListAccessible filters by group membership before count, limit, and offset are
+// ListAccessible filters by group membership and author before count, limit, and offset are
 // applied so pagination metadata describes the rows visible to the caller.
 func (r *GormFileRepository) ListAccessible(
 	ctx context.Context,
@@ -240,7 +240,8 @@ func (r *GormFileRepository) ListAccessible(
 	offset int,
 ) ([]*file.FileRecord, int64, error) {
 	permissionFilter := `(
-		NOT EXISTS (
+		author_id = ?
+		OR NOT EXISTS (
 			SELECT 1 FROM file_group_files fgf
 			WHERE fgf.file_id = file_records.id
 		)
@@ -254,7 +255,37 @@ func (r *GormFileRepository) ListAccessible(
 				AND fgm.permission >= ?
 		)
 	)`
-	return r.listWithFilter(ctx, nil, tag, limit, offset, permissionFilter, userID, int(required))
+	return r.listWithFilter(ctx, nil, tag, limit, offset, permissionFilter, userID, userID, int(required))
+}
+
+// GetAccessibleFileIDs retrieves all file IDs accessible by the user.
+func (r *GormFileRepository) GetAccessibleFileIDs(
+	ctx context.Context,
+	userID string,
+	required file.GroupPermission,
+) ([]string, error) {
+	var fileIDs []string
+	permissionFilter := `(
+		author_id = ?
+		OR NOT EXISTS (
+			SELECT 1 FROM file_group_files fgf
+			WHERE fgf.file_id = file_records.id
+		)
+		OR EXISTS (
+			SELECT 1
+			FROM file_group_files fgf
+			JOIN file_group_members fgm
+				ON fgm.file_group_id = fgf.file_group_id
+			WHERE fgf.file_id = file_records.id
+				AND fgm.user_id = ?
+				AND fgm.permission >= ?
+		)
+	)`
+	err := r.db.WithContext(ctx).
+		Model(&gormFileRecord{}).
+		Where(permissionFilter, userID, userID, int(required)).
+		Pluck("id", &fileIDs).Error
+	return fileIDs, err
 }
 
 // ListByAuthorID fetches file records for an author with pagination.

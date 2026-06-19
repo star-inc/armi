@@ -63,3 +63,64 @@ func TestListAccessibleAppliesPermissionBeforePagination(t *testing.T) {
 		t.Fatal("hidden file was returned")
 	}
 }
+
+func TestGetAccessibleFileIDs(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(
+		&gormFileRecord{},
+		&gormFileGroup{},
+		&gormFileGroupMember{},
+		&gormFileGroupFile{},
+		&gormTag{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	repo := &GormFileRepository{db: db}
+	records := []*file.FileRecord{
+		{ID: "public", Filename: "public.txt", Hash: "hash-public", AuthorID: "author"},
+		{ID: "hidden", Filename: "hidden.txt", Hash: "hash-hidden", AuthorID: "author", GroupIDs: []string{"hidden-group"}},
+		{ID: "visible", Filename: "visible.txt", Hash: "hash-visible", AuthorID: "author", GroupIDs: []string{"visible-group"}},
+		{ID: "owned-hidden", Filename: "owned-hidden.txt", Hash: "hash-owned", AuthorID: "reader", GroupIDs: []string{"hidden-group"}},
+	}
+	for _, record := range records {
+		if err := repo.Create(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&gormFileGroupMember{
+		UserID:      "reader",
+		FileGroupID: "visible-group",
+		Permission:  int(file.GroupPermissionRead),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := repo.GetAccessibleFileIDs(ctx, "reader", file.GroupPermissionRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// reader should have access to: "public", "visible", and "owned-hidden" (as they are the author)
+	// but NOT "hidden"
+	expected := map[string]bool{
+		"public":       true,
+		"visible":      true,
+		"owned-hidden": true,
+	}
+
+	if len(ids) != len(expected) {
+		t.Fatalf("expected %d accessible file IDs, got %d: %v", len(expected), len(ids), ids)
+	}
+
+	for _, id := range ids {
+		if !expected[id] {
+			t.Errorf("unexpected accessible file ID: %s", id)
+		}
+	}
+}
+

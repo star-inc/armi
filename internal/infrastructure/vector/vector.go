@@ -3,6 +3,7 @@ package vector
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -156,7 +157,7 @@ func (s *SQLiteVectorDB) Copy(ctx context.Context, srcFileID string, destFileID 
 }
 
 // Search queries sqlite-vec for similar vectors and keywords.
-func (s *SQLiteVectorDB) Search(ctx context.Context, embedding []float32, keywords []string, limit int) ([]file.SearchResult, error) {
+func (s *SQLiteVectorDB) Search(ctx context.Context, embedding []float32, keywords []string, fileIDs []string, limit int) ([]file.SearchResult, error) {
 	if database.DB == nil {
 		return nil, fmt.Errorf("rdbms database not initialized")
 	}
@@ -168,10 +169,19 @@ func (s *SQLiteVectorDB) Search(ctx context.Context, embedding []float32, keywor
 	}
 
 	// 1. Vector Search
-	rows, err := database.DB.WithContext(ctx).Raw(
-		"SELECT file_id, chunk_id, text, distance FROM file_embeddings WHERE embedding MATCH ? AND k = ? ORDER BY distance ASC",
-		serialized, limit,
-	).Rows()
+	var rows *sql.Rows
+	var err error
+	if len(fileIDs) > 0 {
+		rows, err = database.DB.WithContext(ctx).Raw(
+			"SELECT file_id, chunk_id, text, distance FROM file_embeddings WHERE file_id IN ? AND embedding MATCH ? AND k = ? ORDER BY distance ASC",
+			fileIDs, serialized, limit,
+		).Rows()
+	} else {
+		rows, err = database.DB.WithContext(ctx).Raw(
+			"SELECT file_id, chunk_id, text, distance FROM file_embeddings WHERE embedding MATCH ? AND k = ? ORDER BY distance ASC",
+			serialized, limit,
+		).Rows()
+	}
 
 	if err != nil {
 		slog.Error("sqlite-vec search failed", "error", err)
@@ -205,11 +215,20 @@ func (s *SQLiteVectorDB) Search(ctx context.Context, embedding []float32, keywor
 			args = append(args, "%"+kw+"%")
 		}
 
-		queryStr := fmt.Sprintf(
-			"SELECT file_id, chunk_id, text FROM file_embeddings WHERE %s LIMIT ?",
-			strings.Join(conditions, " OR "),
-		)
-		args = append(args, limit)
+		var queryStr string
+		if len(fileIDs) > 0 {
+			queryStr = fmt.Sprintf(
+				"SELECT file_id, chunk_id, text FROM file_embeddings WHERE (%s) AND file_id IN ? LIMIT ?",
+				strings.Join(conditions, " OR "),
+			)
+			args = append(args, fileIDs, limit)
+		} else {
+			queryStr = fmt.Sprintf(
+				"SELECT file_id, chunk_id, text FROM file_embeddings WHERE %s LIMIT ?",
+				strings.Join(conditions, " OR "),
+			)
+			args = append(args, limit)
+		}
 
 		kwRows, kwErr := database.DB.WithContext(ctx).Raw(queryStr, args...).Rows()
 		if kwErr == nil {
@@ -494,7 +513,7 @@ func (q *QdrantVectorDB) Copy(ctx context.Context, srcFileID string, destFileID 
 }
 
 // Search finds similar vectors in Qdrant with hybrid keyword support.
-func (q *QdrantVectorDB) Search(ctx context.Context, embedding []float32, keywords []string, limit int) ([]file.SearchResult, error) {
+func (q *QdrantVectorDB) Search(ctx context.Context, embedding []float32, keywords []string, fileIDs []string, limit int) ([]file.SearchResult, error) {
 	base, err := url.Parse(q.URL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid qdrant url: %w", err)
@@ -506,6 +525,18 @@ func (q *QdrantVectorDB) Search(ctx context.Context, embedding []float32, keywor
 		"vector":       embedding,
 		"limit":        limit,
 		"with_payload": true,
+	}
+	if len(fileIDs) > 0 {
+		reqBody["filter"] = map[string]interface{}{
+			"must": []map[string]interface{}{
+				{
+					"key": "file_id",
+					"match": map[string]interface{}{
+						"any": fileIDs,
+					},
+				},
+			},
+		}
 	}
 	jsonBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -572,10 +603,22 @@ func (q *QdrantVectorDB) Search(ctx context.Context, embedding []float32, keywor
 			})
 		}
 
+		filterBody := map[string]interface{}{
+			"should": matches,
+		}
+		if len(fileIDs) > 0 {
+			filterBody["must"] = []map[string]interface{}{
+				{
+					"key": "file_id",
+					"match": map[string]interface{}{
+						"any": fileIDs,
+					},
+				},
+			}
+		}
+
 		scrollReqBody := map[string]interface{}{
-			"filter": map[string]interface{}{
-				"should": matches,
-			},
+			"filter":       filterBody,
 			"with_payload": true,
 			"limit":        limit,
 		}

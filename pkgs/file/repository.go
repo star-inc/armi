@@ -11,6 +11,7 @@ type FileRepository interface {
 	UpdateEmbeddingStatus(ctx context.Context, id string, status string) error
 	List(ctx context.Context, tag string, limit int, offset int) ([]*FileRecord, int64, error)
 	ListAccessible(ctx context.Context, userID string, tag string, required GroupPermission, limit int, offset int) ([]*FileRecord, int64, error)
+	GetAccessibleFileIDs(ctx context.Context, userID string, required GroupPermission) ([]string, error)
 	ListByAuthorID(ctx context.Context, authorID string, tag string, limit int, offset int) ([]*FileRecord, int64, error)
 	GetGroupPermission(ctx context.Context, userID string, groupID string) (GroupPermission, bool, error)
 	GetGroupIDsByFileID(ctx context.Context, fileID string) ([]string, error)

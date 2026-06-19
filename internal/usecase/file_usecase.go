@@ -790,6 +790,20 @@ func (uc *FileUsecase) Search(
 		}
 	}
 
+	var fileIDs []string
+	if viper.GetBool("auth.rbac.enabled") {
+		var err error
+		fileIDs, err = uc.fileRepo.GetAccessibleFileIDs(ctx, userID, file.GroupPermissionRead)
+		if err != nil {
+			slog.Error("failed to get accessible file ids", "user_id", userID, "error", err)
+			return nil, err
+		}
+		if len(fileIDs) == 0 {
+			// No accessible files, return empty search results immediately
+			return nil, nil
+		}
+	}
+
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
@@ -806,7 +820,7 @@ func (uc *FileUsecase) Search(
 			}
 
 			// Perform vector and keyword hybrid search
-			searchResults, err := uc.vectorDB.Search(ctx, queryEmbedding, keywords, queryLimit)
+			searchResults, err := uc.vectorDB.Search(ctx, queryEmbedding, keywords, fileIDs, queryLimit)
 			if err != nil {
 				slog.Error("vector database search failed", "query", q, "error", err)
 				return

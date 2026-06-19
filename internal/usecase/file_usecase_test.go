@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/star-inc/armi/pkgs/contract"
@@ -13,10 +14,11 @@ import (
 )
 
 type fallbackRepo struct {
-	status  string
-	record  *file.FileRecord
-	count   int64
-	deleted bool
+	status            string
+	record            *file.FileRecord
+	count             int64
+	deleted           bool
+	accessibleFileIDs []string
 }
 
 func (r *fallbackRepo) Create(context.Context, *file.FileRecord) error { return nil }
@@ -36,6 +38,9 @@ func (r *fallbackRepo) List(context.Context, string, int, int) ([]*file.FileReco
 }
 func (r *fallbackRepo) ListAccessible(context.Context, string, string, file.GroupPermission, int, int) ([]*file.FileRecord, int64, error) {
 	return nil, 0, nil
+}
+func (r *fallbackRepo) GetAccessibleFileIDs(context.Context, string, file.GroupPermission) ([]string, error) {
+	return r.accessibleFileIDs, nil
 }
 func (r *fallbackRepo) ListByAuthorID(context.Context, string, string, int, int) ([]*file.FileRecord, int64, error) {
 	return nil, 0, nil
@@ -104,7 +109,7 @@ func (v *fallbackVectorDB) Insert(context.Context, string, int, string, []float3
 	return nil
 }
 func (v *fallbackVectorDB) Copy(context.Context, string, string) error { return nil }
-func (v *fallbackVectorDB) Search(context.Context, []float32, []string, int) ([]file.SearchResult, error) {
+func (v *fallbackVectorDB) Search(context.Context, []float32, []string, []string, int) ([]file.SearchResult, error) {
 	return nil, nil
 }
 func (v *fallbackVectorDB) Delete(context.Context, string) error {
@@ -248,9 +253,14 @@ func (m *mockReranker) Rerank(ctx context.Context, query string, documents []str
 
 type mockSearchVectorDB struct {
 	fallbackVectorDB
+	mu                sync.Mutex
+	lastSearchFileIDs []string
 }
 
-func (m *mockSearchVectorDB) Search(context.Context, []float32, []string, int) ([]file.SearchResult, error) {
+func (m *mockSearchVectorDB) Search(ctx context.Context, queryVector []float32, keywords []string, fileIDs []string, limit int) ([]file.SearchResult, error) {
+	m.mu.Lock()
+	m.lastSearchFileIDs = fileIDs
+	m.mu.Unlock()
 	return []file.SearchResult{
 		{FileID: "file-1", ChunkID: "chunk-1", Text: "text-1", Distance: 0.1},
 		{FileID: "file-1", ChunkID: "chunk-2", Text: "text-2", Distance: 0.8},
@@ -308,3 +318,45 @@ func TestSearchRerank(t *testing.T) {
 		t.Fatalf("expected top result chunk ID to be chunk-2, got %s", results[0].ChunkID)
 	}
 }
+
+func TestSearchPreFiltering(t *testing.T) {
+	// Enable RBAC
+	origRbac := viper.Get("auth.rbac.enabled")
+	defer func() {
+		viper.Set("auth.rbac.enabled", origRbac)
+	}()
+	viper.Set("auth.rbac.enabled", true)
+
+	repo := &fallbackRepo{
+		accessibleFileIDs: []string{"file-1", "file-2"},
+		record: &file.FileRecord{
+			ID:              "file-1",
+			Filename:        "doc1.txt",
+			AuthorID:        "user-1",
+			EmbeddingStatus: "completed",
+		},
+	}
+	embedder := fallbackEmbedder{}
+	vectorDB := &mockSearchVectorDB{}
+	publisher := fallbackPublisher{}
+
+	uc := NewFileUsecase(repo, nil, embedder, vectorDB, nil, publisher, nil, nil)
+
+	results, err := uc.Search(context.Background(), "user-1", "test query", 2, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	vectorDB.mu.Lock()
+	searchFileIDs := vectorDB.lastSearchFileIDs
+	vectorDB.mu.Unlock()
+
+	if len(searchFileIDs) != 2 || searchFileIDs[0] != "file-1" || searchFileIDs[1] != "file-2" {
+		t.Fatalf("expected search to be pre-filtered with [file-1 file-2], got %v", searchFileIDs)
+	}
+}
+
