@@ -3,9 +3,11 @@ name: Test workflow
 on:
   push:
     branches:
+      - rolling
       - main
   pull_request:
     branches:
+      - rolling
       - main
 
 jobs:
