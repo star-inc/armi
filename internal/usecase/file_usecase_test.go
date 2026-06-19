@@ -3,10 +3,13 @@ package usecase
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/star-inc/armi/pkgs/contract"
 	"github.com/star-inc/armi/pkgs/file"
+	"github.com/spf13/viper"
 )
 
 type fallbackRepo struct {
@@ -186,5 +189,45 @@ func TestDeleteRegistersCleanupJob(t *testing.T) {
 	}
 	if !repo.deleted {
 		t.Fatal("expected DeleteWithCleanup to delete the file record and register cleanup job")
+	}
+}
+
+func TestNewFileUsecaseGseConfig(t *testing.T) {
+	// Backup original config values
+	origEmbed := viper.Get("gse.dict_embed")
+	origPaths := viper.Get("gse.dict_paths")
+	defer func() {
+		viper.Set("gse.dict_embed", origEmbed)
+		viper.Set("gse.dict_paths", origPaths)
+	}()
+
+	// Create temp dictionary file
+	tempDir := t.TempDir()
+	tempFile := filepath.Join(tempDir, "custom_dict.txt")
+	content := []byte("自定義分詞 100 n\n")
+	if err := os.WriteFile(tempFile, content, 0644); err != nil {
+		t.Fatalf("failed to write temp dict file: %v", err)
+	}
+
+	// Set config values
+	viper.Set("gse.dict_embed", "")
+	viper.Set("gse.dict_paths", []string{tempFile})
+
+	// Initialize FileUsecase
+	uc := NewFileUsecase(nil, nil, nil, nil, nil, nil, nil)
+	if uc.segmenter == nil {
+		t.Fatal("expected segmenter to be initialized, got nil")
+	}
+
+	words := uc.segmenter.Cut("測試自定義分詞功能", true)
+	found := false
+	for _, w := range words {
+		if w == "自定義分詞" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected custom word '自定義分詞' to be segmented, got words: %v", words)
 	}
 }

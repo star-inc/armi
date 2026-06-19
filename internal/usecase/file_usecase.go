@@ -41,12 +41,39 @@ func NewFileUsecase(
 	jobPublisher file.EmbeddingJobPublisher,
 ) *FileUsecase {
 	var segmenter *gse.Segmenter
-	seg, err := gse.NewEmbed("zh")
-	if err != nil {
-		slog.Warn("failed to initialize gse segmenter, word segmentation will be skipped", "error", err)
-	} else {
-		segmenter = &seg
-		slog.Info("Initialized gse segmenter successfully (embed dictionary)")
+	var seg gse.Segmenter
+	var err error
+
+	dictEmbed := viper.GetString("gse.dict_embed")
+	dictPaths := viper.GetStringSlice("gse.dict_paths")
+
+	if dictEmbed != "" {
+		seg, err = gse.NewEmbed(dictEmbed)
+		if err != nil {
+			slog.Warn("failed to initialize gse segmenter with embed dict", "embed", dictEmbed, "error", err)
+		} else {
+			segmenter = &seg
+			slog.Info("Initialized gse segmenter successfully (embed dictionary)", "embed", dictEmbed)
+		}
+	}
+
+	if len(dictPaths) > 0 {
+		pathsStr := strings.Join(dictPaths, ",")
+		if segmenter != nil {
+			if err = segmenter.LoadDict(pathsStr); err != nil {
+				slog.Warn("failed to load custom gse dictionary paths", "paths", dictPaths, "error", err)
+			} else {
+				slog.Info("Loaded custom gse dictionary paths successfully", "paths", dictPaths)
+			}
+		} else {
+			seg, err = gse.New(pathsStr)
+			if err != nil {
+				slog.Warn("failed to initialize gse segmenter with custom paths", "paths", dictPaths, "error", err)
+			} else {
+				segmenter = &seg
+				slog.Info("Initialized gse segmenter successfully (custom paths only)", "paths", dictPaths)
+			}
+		}
 	}
 
 	return &FileUsecase{
@@ -644,16 +671,19 @@ func (uc *FileUsecase) Delete(ctx context.Context, userID string, fileID string)
 	// Trigger immediate background cleanup (best-effort)
 	go func() {
 		bgCtx := context.Background()
-		vecDelErr := uc.vectorDB.Delete(bgCtx, fileID)
+		var vecDelErr error
+		if uc.vectorDB != nil {
+			vecDelErr = uc.vectorDB.Delete(bgCtx, fileID)
+		}
 		var storeDelErr error
-		if deletePhysical {
+		if deletePhysical && uc.storage != nil {
 			// Double check active ref count
 			c, cErr := uc.fileRepo.CountByHash(bgCtx, record.Hash)
 			if cErr == nil && c == 0 {
 				storeDelErr = uc.storage.Delete(bgCtx, key)
 			}
 		}
-		if vecDelErr == nil && storeDelErr == nil {
+		if vecDelErr == nil && storeDelErr == nil && uc.fileRepo != nil {
 			_ = uc.fileRepo.DeleteCleanupJob(bgCtx, cleanupJob.ID)
 		}
 	}()

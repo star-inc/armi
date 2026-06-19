@@ -84,6 +84,10 @@ func InitConfig() {
 	viper.SetDefault("llm.openai.api_key", "")
 	viper.SetDefault("llm.openai.base_url", "https://api.portkey.ai/v1")
 
+	// GSE Defaults
+	viper.SetDefault("gse.dict_embed", "zh")
+	viper.SetDefault("gse.dict_paths", []string{})
+
 	// Auth Scheme Defaults
 	// Accepted values: "basic", "bearer", "both"
 	viper.SetDefault("auth.scheme", "both")
